@@ -1,0 +1,24 @@
+site_name: Two Strains Dengue HMS Model
+site_description: Package, workflow, and GitHub Pages documentation for the Two Strains Dengue HMS model.
+site_url: https://sauldiazinfante.github.io/Two-Strains-Dengue-HMS-Model/
+repo_url: https://github.com/SaulDiazInfante/Two-Strains-Dengue-HMS-Model
+repo_name: SaulDiazInfante/Two-Strains-Dengue-HMS-Model
+edit_uri: edit/master/python_code/docs/
+docs_dir: docs
+site_dir: site
+strict: true
+
+theme:
+  name: mkdocs
+
+nav:
+  - Home: index.md
+  - API Reference: api.md
+  - Workflows: workflows.md
+  - GitHub Setup: github-pages.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true

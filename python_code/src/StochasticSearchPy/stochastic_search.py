@@ -1,19 +1,52 @@
+"""Core stochastic search model and plotting utilities."""
+
 import numpy as np
+import pandas as pd
 import datetime
 import yaml
 from scipy import integrate
 import matplotlib.pyplot as plt
+from pathlib import Path
+
+# Local import used lazily inside __init__ if raw_data files are missing.
+try:
+    from . import data_processing
+except ImportError:
+    # Fallback for running as a script (python stochastic_searchPy.py)
+    import data_processing
 
 
-class StochasticSearch():
-    def __init__(self):
+class StochasticSearch(data_processing.DataProcessing):
+    """Run the two-strain dengue search model against prepared input data.
+
+    Parameters
+    ----------
+    data_dir:
+        Directory containing prepared input files.
+    runtime_dir:
+        Directory where plots, parameter snapshots, and other generated
+        artifacts should be written.
+    """
+
+    def __init__(self, data_dir=None, runtime_dir=None):
+        super().__init__(data_dir=data_dir)
         self.number_of_samples = 30
-        self.frecuency_per_week_DF = \
-            np.loadtxt('./data/frecuency_per_week_DF.dat', dtype='int',
-                       delimiter=',')
-        self.frecuency_per_week_DHF = \
-            np.loadtxt('./data/frecuency_per_week_DHF.dat', dtype='int',
-                       delimiter=',')
+        self.base_dir = Path(__file__).resolve().parent
+        self.runtime_dir = Path(runtime_dir) if runtime_dir is not None else Path.cwd() / "artifacts"
+        df_path = Path(self._data_path("frecuency_per_week_DF.dat"))
+        dhf_path = Path(self._data_path("frecuency_per_week_DHF.dat"))
+        self.plots_dir = self.runtime_dir / "plots"
+        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = self.runtime_dir / "parameters"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # If the .dat files are missing, build them from source raw_data.
+        if not df_path.exists() or not dhf_path.exists():
+            self.frecuency_per_day_and_week()
+        self.frecuency_per_week_DF = np.loadtxt(df_path, dtype='int',
+                                                delimiter=',')
+        self.frecuency_per_week_DHF = np.loadtxt(dhf_path, dtype='int',
+                                                 delimiter=',')
         self.bound_error_FD = 100
         self.bound_error_FHD = 30
         self.bound_initial_error_FHD = 20
@@ -52,7 +85,7 @@ class StochasticSearch():
         self.Lambda_S = 0.9 * self.mu_H * self.N_H
         self.t0 = 25  # 25.0
         self.T = 53
-        self.grid_size = np.int(self.T - self.t0) * 10000
+        self.grid_size = int(self.T - self.t0) * 10000
         self.h = np.float64(self.T) / np.float64(self.grid_size)
         self.r_01 = 0.0
         self.r_02 = 0.0
@@ -69,6 +102,7 @@ class StochasticSearch():
         self.stop_condition = False
 
     def update_conditions_search(self):
+        """Evaluate whether the current sample satisfies acceptance criteria."""
         r_zero_cond = (self.r_zero > 1)
         fitting_error_DF_cond = (self.fitting_error_DF < self.bound_error_FD)
         fitting_error_DHF_cond = (self.fitting_error_DHF
@@ -84,6 +118,7 @@ class StochasticSearch():
         return stop_condition
 
     def fitting_plot(self):
+        """Write the DF/DHF fitting comparison figure to ``runtime_dir``."""
         t = self.t
         Y_m1_h = self.solution[:, 8]
         z = self.solution[:, 9]
@@ -123,8 +158,26 @@ class StochasticSearch():
         '''
         #
         f1, ax_array = plt.subplots(2, 2, sharex=True)
+
+        def _padded_limits(*arrays, pad=0.1, floor=None):
+            stacked = np.concatenate([np.asarray(a).ravel() for a in arrays if len(a) > 0])
+            data_range = stacked.max() - stacked.min()
+            pad_val = data_range * pad if data_range > 0 else pad
+            lower = stacked.min() - pad_val
+            if floor is not None:
+                lower = max(floor, lower)
+            return lower, stacked.max() + pad_val
+
+        # Use dynamic y-limits so raw_data and simulation are both visible.
+        df_ymin, df_ymax = _padded_limits(frecuency_per_week_DF, z_points, pad=0.15, floor=0.0)
+        dhf_ymin, dhf_ymax = _padded_limits(frecuency_per_week_DHF, Y_m1_h_points, pad=0.15, floor=0.0)
+        df_xmin, df_xmax = _padded_limits(t_data_DF, t_z, pad=0.02)
+        dhf_xmin, dhf_xmax = _padded_limits(t_data_DHF, t_Y_m1_h, pad=0.02)
+
         ax_array[0, 0].plot(t, z, 'b-')
         ax_array[0, 0].set_title(r'Reported DF ')
+        ax_array[0, 0].set_xlim(df_xmin, df_xmax)
+        ax_array[0, 0].set_ylim(df_ymin, df_ymax)
 
         ax_array[0, 1].plot(t_data_DF, frecuency_per_week_DF,
                             ls='--',
@@ -148,12 +201,15 @@ class StochasticSearch():
                             'err=' + str(np.round(self.fitting_error_DF, 1)),
                             fontsize=10
                             )
-        ax_array[0, 1].set_ylim(0, 400)
+        ax_array[0, 1].set_ylim(df_ymin, df_ymax)
+        ax_array[0, 1].set_xlim(df_xmin, df_xmax)
 
         ax_array[0, 1].set_title(r'DF Fitting ')
         #
         ax_array[1, 0].plot(t, Y_m1_h, 'r-')
         ax_array[1, 0].set_title(r'DHF')
+        ax_array[1, 0].set_xlim(dhf_xmin, dhf_xmax)
+        ax_array[1, 0].set_ylim(dhf_ymin, dhf_ymax)
         ax_array[1, 1].plot(t_data_DHF, frecuency_per_week_DHF,
                             ls='--',
                             color='orange',
@@ -175,7 +231,8 @@ class StochasticSearch():
                             'err=' + str(np.round(self.fitting_error_DHF, 1)),
                             fontsize=10
                             )
-        ax_array[1, 1].set_ylim(0, 60)
+        ax_array[1, 1].set_ylim(dhf_ymin, dhf_ymax)
+        ax_array[1, 1].set_xlim(dhf_xmin, dhf_xmax)
         ax_array[1, 1].set_title(r'DHF Fitting ')
 
         for i in np.arange(2):
@@ -184,9 +241,93 @@ class StochasticSearch():
             ax_array[j, 0].set(ylabel='Individuals')
 
         plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=1.0)
-        plt.savefig('./plots/fitting_DF_DHF.png')
+        plt.savefig(self.plots_dir / 'fitting_DF_DHF.png')
+        plt.close(f1)
+
+    def plot_input_data(self):
+        """Plot daily DF and DHF case time series from CSVs in two stacked axes.
+
+        Reads ``cases_per_date_FD.csv`` and ``cases_per_date_FHD.csv`` from
+        ``self.data_dir`` with the first column parsed as dates. Produces a
+        2-row by 1-column figure saved to ``plots/input_cases_timeseries.png``.
+        """
+        df_fd_path = self.data_dir / 'incidence_data_FD.csv'
+        df_fhd_path = self.data_dir / 'incidence_data_FHD.csv'
+
+        # Expect two columns: date, label. Parse the first as datetime.
+        # Date strings are in M/D/YYYY format. FHD file already contains a header.
+        date_format = '%m/%d/%Y'
+        df_fd = pd.read_csv(
+            df_fd_path,
+            header=0,
+            names=['date', 'incidence'],
+            parse_dates=['date'],
+            date_format=date_format,
+        )
+        # Each row is a single reported case; set numeric incidence count.
+        df_fhd = pd.read_csv(
+            df_fhd_path,
+            header=0,
+            names=['date', 'incidence'],
+            parse_dates=['date'],
+            date_format=date_format,
+        )
+        def _week_counts(frame: pd.DataFrame) -> pd.DataFrame:
+            # Convert each record's date to the start of its ISO week to retain a
+            # calendar-aware type (Timestamp) instead of a plain integer week
+            # number. This keeps downstream CSVs and plots date-typed weeks.
+            week = frame['date'].dt.to_period('W').dt.start_time
+            counts = frame.groupby(week).size().reset_index(name='count')
+            counts.rename(columns={counts.columns[0]: 'week'}, inplace=True)
+            return counts
+
+        freq_df = _week_counts(df_fd)
+        freq_dhf = _week_counts(df_fhd)
+        # Ensure week column is explicitly datetime-typed (start of week).
+        freq_df['week'] = pd.to_datetime(freq_df['week'])
+        freq_dhf['week'] = pd.to_datetime(freq_dhf['week'])
+        freq_df.to_csv(self._data_path('frecuency_per_week_DF.csv'),
+                       index=False)
+        freq_dhf.to_csv(self._data_path('frecuency_per_week_DHF.csv'),
+                        index=False)
+
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 6),
+                                 sharex=True)
+
+        axes[0].plot(
+            freq_df['week'],
+            freq_df['count'],
+            linestyle='', marker='o', markersize=4,
+            color='steelblue', alpha=0.6
+        )
+        axes[0].set_title('Incidence of DF cases per week')
+        axes[0].set_ylabel('Dengue Fever incidence')
+
+        axes[1].plot(
+            freq_dhf['week'],
+            freq_dhf['count'],
+            linestyle='', marker='o', markersize=4,
+            color='tomato',
+            alpha=0.6
+        )
+        axes[1].set_title('DHF cases over time')
+        axes[1].set_ylabel('Dengue Hemorrhagic Fever incidence')
+        axes[1].set_xlabel('Date')
+
+        for i, ax in enumerate(axes):
+            ax.grid(alpha=0.3, linestyle='--', linewidth=0.5)
+            # Tighten y-limits to keep dots visible around 1.
+            if i == 0:
+                ax.set_ylim(0.0, freq_df['count'].max() * 1.1)
+            else:
+                ax.set_ylim(0.0, freq_dhf['count'].max() * 1.1)
+        fig.autofmt_xdate()
+        plt.tight_layout()
+        plt.savefig(self.plots_dir / 'input_cases_timeseries.png')
+        plt.close(fig)
 
     def fitting_error(self):
+        """Compute the current DF and DHF fitting errors from the ODE solution."""
         #
         #
         #
@@ -234,12 +375,8 @@ class StochasticSearch():
 
     @staticmethod
     def f_rhs(x, t, Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b,
-              mu_M, mu_H, alpha_c, alpha_h, sigma, p, theta):
-        """
-        :param Lambda_M:
-        :type mu_M: object
-        :type alpha_h: float64
-        """
+              mu_M, mu_H, alpha_c, alpha_h, sigma, p, theta, q):
+        """Right-hand side of the compartmental ODE system."""
         M_s = x[0]
         M_I1 = x[1]
         M_I2 = x[2]
@@ -254,6 +391,10 @@ class StochasticSearch():
         #
         #
         N_H = S + I_1 + I_2 + S_m1 + Y_m1_c + Y_m1_h + R
+        # Births scale with current N_H to keep dN_H/dt ≈ 0.
+        Lambda_total = mu_H * N_H
+        Lambda_S = q * Lambda_total
+        Lambda_S_m1 = (1.0 - q) * Lambda_total
         c_M = (beta_M * b / N_H)
         c_H = (beta_H * b / N_H)
         A_I1 = c_M * I_1
@@ -290,6 +431,7 @@ class StochasticSearch():
         return dydt
 #
     def ode_int_solution(self):
+        """Integrate the model ODE system over the configured time grid."""
         T = self.T
         t0 = self.t0
         t = np.linspace(t0, T, self.grid_size)
@@ -298,9 +440,12 @@ class StochasticSearch():
              self.S_0, self.I_10, self.I_20,
              self.S_m1_0, self.Y_m1_c0, self.Y_m1_h0,
              self.z0, self.Rec_0])
+        # Births depend on current N_H to keep N_H near-constant:
+        # split between seronegative (q) and seropositive (1-q)
+        q = 0.9
         Lambda_M = self.Lambda_M
-        Lambda_S_m1 = self.Lambda_S_m1
-        Lambda_S = self.Lambda_S
+        Lambda_S_m1 = None  # computed on the fly in f_rhs
+        Lambda_S = None     # computed on the fly in f_rhs
         beta_M = self.beta_M
         beta_H = self.beta_H
         b = self.b
@@ -317,12 +462,20 @@ class StochasticSearch():
         y = integrate.odeint(self.f_rhs, y_0, t,
                              args=(Lambda_M, Lambda_S, Lambda_S_m1,
                                    beta_M, beta_H, b, mu_M, mu_H, alpha_c,
-                                   alpha_h, sigma, p, theta))
+                                   alpha_h, sigma, p, theta, q))
         self.solution = y
         self.t = t
         return y
 
     def parameters_sampling(self, flag_deterministic=False):
+        """Sample a new parameter set and update the model state in place.
+
+        Parameters
+        ----------
+        flag_deterministic:
+            When ``True``, load a fixed baseline parameter set instead of
+            drawing random values.
+        """
         #
         #
         if flag_deterministic:
@@ -461,8 +614,8 @@ class StochasticSearch():
         new_parameters = np.array(new_parameters)
         return new_parameters
 
-    def save_parameters(self,
-                        file_name_prefix='./OutputParameters/parameters'):
+    def save_parameters(self, file_name_prefix=None):
+        """Persist the current parameter state as a YAML snapshot."""
 
         # load parameters
         Lambda_M = self.Lambda_M
@@ -509,12 +662,14 @@ class StochasticSearch():
         #
         #
         #
-        str_time = str(datetime.datetime.now())
-        file_name = file_name_prefix + str_time + '.yml'
+        str_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        prefix = file_name_prefix or str(self.output_dir / 'parameters_')
+        file_name = prefix + str_time + '.yml'
         with open(file_name, 'w') as outfile:
-            yaml.dump(parameters, outfile, default_flow_style=False)
+            yaml.safe_dump(parameters, outfile, default_flow_style=False)
 
     def compute_r_zero(self):
+        """Compute the basic reproduction number and its two components."""
         # load parameters
         Lambda_M = self.Lambda_M
         beta_M = self.beta_M
@@ -554,6 +709,7 @@ class StochasticSearch():
         return np.sqrt(r_01), np.sqrt(r_02), r_zero
 
     def solution_plot(self):
+        """Write compartment population plots for the current ODE solution."""
 
         M_s = self.solution[:, 0]
         M_1 = self.solution[:, 1]
@@ -622,7 +778,7 @@ class StochasticSearch():
             ax_array[j, 0].set(ylabel='Individuals')
         #
         plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=1.0)
-        plt.savefig('./plots/populations_grid.png')
+        plt.savefig(self.plots_dir / 'populations_grid.png')
         plt.close(f1)
         #
         #
@@ -647,12 +803,13 @@ class StochasticSearch():
         plt.ylabel(r'$Y_{-1h}$')
         plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=1.0)
         # plt.show()
-        plt.savefig('./plots/DF_DHF.png')
+        plt.savefig(self.plots_dir / 'DF_DHF.png')
         plt.close(2)
 
     def load_parameters(self, file_name):
+        """Load model parameters from a YAML file into the current instance."""
         with open(file_name, 'r') as f:
-            parameter_data = yaml.load(f)
+            parameter_data = yaml.safe_load(f)
         # Set initial conditions
         #
         self.Lambda_M = np.float64(parameter_data.get('Lambda_M'))

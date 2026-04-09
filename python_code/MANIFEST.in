@@ -1,0 +1,13 @@
+include README.md
+graft src
+graft docs
+graft tests
+prune data/reference/raw_data
+prune src/StochasticSearchPy/__pycache__
+prune src/StochasticSearchPy/OutputParameters
+prune src/StochasticSearchPy/plots
+exclude src/StochasticSearchPy/*.pyc
+exclude src/StochasticSearchPy/accepted_samples.txt
+exclude src/StochasticSearchPy/*.yml
+global-exclude __pycache__/*
+global-exclude *.py[cod]

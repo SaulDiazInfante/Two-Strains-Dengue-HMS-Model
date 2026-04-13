@@ -4,6 +4,7 @@ This directory stores the committed reference dataset used for local development
 
 - Source data lives in `raw_data/`.
 - The Python wheel does not bundle these files.
+- The packaged workflow now treats weekly frequency tables as CSV artifacts instead of legacy `.dat` files.
 - Create a working copy for runs with:
 
 ```bash

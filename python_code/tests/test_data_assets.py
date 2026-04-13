@@ -1,15 +1,15 @@
 from StochasticSearchPy import data_assets
 
 
-def test_resolve_data_dir_prefers_environment_variable(tmp_path, monkeypatch):
+def test_resolve_data_directory_prefers_environment_variable(tmp_path, monkeypatch):
     env_data_dir = tmp_path / "env-data"
     env_data_dir.mkdir()
     monkeypatch.setenv(data_assets.DATA_DIR_ENV_VAR, str(env_data_dir))
 
-    assert data_assets.resolve_data_dir() == env_data_dir
+    assert data_assets.resolve_data_directory() == env_data_dir
 
 
-def test_prepare_data_directory_copies_reference_files(tmp_path, monkeypatch):
+def test_copy_reference_dataset_copies_reference_files(tmp_path, monkeypatch):
     source_dir = tmp_path / "reference"
     output_dir = tmp_path / "prepared"
     source_dir.mkdir()
@@ -20,7 +20,7 @@ def test_prepare_data_directory_copies_reference_files(tmp_path, monkeypatch):
 
     monkeypatch.setattr(data_assets, "REFERENCE_DATA_FILES", file_names)
 
-    resolved_source, resolved_output, copied_files = data_assets.prepare_data_directory(
+    resolved_source, resolved_output, copied_files = data_assets.copy_reference_dataset(
         output_dir=output_dir,
         source_dir=source_dir,
     )

@@ -76,6 +76,16 @@ Generate frequency tables:
 two-strains-dengue frequency-tables --data-dir ./path/to/data
 ```
 
+From Python you can now generate them in two steps:
+
+```python
+from StochasticSearchPy import DataProcessing
+
+with DataProcessing(data_dir="./artifacts/data") as processor:
+    per_date_df, per_date_dhf = processor.build_daily_frequency_tables()
+    per_week_df, per_week_dhf = processor.build_weekly_frequency_tables()
+```
+
 Run the stochastic search:
 
 ```bash

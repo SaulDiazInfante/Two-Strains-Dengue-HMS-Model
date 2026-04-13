@@ -1,6 +1,6 @@
 import inspect
 
-from StochasticSearchPy import DataProcessing, StochasticSearch, prepare_data_directory
+from StochasticSearchPy import DataProcessing, StochasticSearch, copy_reference_dataset
 from StochasticSearchPy import cli, data_assets
 
 
@@ -12,18 +12,19 @@ def test_public_modules_have_docstrings():
 def test_public_api_has_docstrings():
     documented_objects = [
         DataProcessing,
-        DataProcessing.close,
-        DataProcessing.incidence_frequency_tables,
-        DataProcessing.frecuency_per_day_and_week,
+        DataProcessing.close_database_connection,
+        DataProcessing.build_daily_frequency_tables,
+        DataProcessing.build_weekly_frequency_tables,
+        DataProcessing.build_weekly_frequency_arrays,
         StochasticSearch,
-        StochasticSearch.compute_r_zero,
-        StochasticSearch.ode_int_solution,
-        StochasticSearch.parameters_sampling,
-        prepare_data_directory,
-        cli.build_parser,
-        cli.run_prepare_data,
-        cli.run_search,
-        cli.main,
+        StochasticSearch.compute_basic_reproduction_numbers,
+        StochasticSearch.solve_ode_system,
+        StochasticSearch.sample_model_parameters,
+        copy_reference_dataset,
+        cli.build_cli_parser,
+        cli.run_prepare_data_command,
+        cli.run_search_command,
+        cli.run_cli,
     ]
 
     for obj in documented_objects:

@@ -30,27 +30,23 @@ class StochasticSearch(data_processing.DataProcessing):
 
     def __init__(self, data_dir=None, runtime_dir=None):
         super().__init__(data_dir=data_dir)
-        self.number_of_samples = 30
+        self.sample_count = 30
         self.base_dir = Path(__file__).resolve().parent
         self.runtime_dir = Path(runtime_dir) if runtime_dir is not None else Path.cwd() / "artifacts"
-        df_path = Path(self._data_path("frecuency_per_week_DF.dat"))
-        dhf_path = Path(self._data_path("frecuency_per_week_DHF.dat"))
+        df_path = Path(self.build_data_file_path("frequency_per_week_DF.csv"))
+        dhf_path = Path(self.build_data_file_path("frequency_per_week_DHF.csv"))
         self.plots_dir = self.runtime_dir / "plots"
         self.plots_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir = self.runtime_dir / "parameters"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # If the .dat files are missing, build them from source raw_data.
+        # If the weekly CSVs are missing, build them from the source incidence data.
         if not df_path.exists() or not dhf_path.exists():
-            self.frecuency_per_day_and_week()
-        self.frecuency_per_week_DF = np.loadtxt(df_path, dtype='int',
-                                                delimiter=',')
-        self.frecuency_per_week_DHF = np.loadtxt(dhf_path, dtype='int',
-                                                 delimiter=',')
-        self.bound_error_FD = 100
-        self.bound_error_FHD = 30
-        self.bound_initial_error_FHD = 20
-        self.bound_initial_error_FD = 10
+            self.build_weekly_frequency_tables()
+        self.weekly_df_frequency_array = self.read_weekly_frequency_array(df_path)
+        self.weekly_dhf_frequency_array = self.read_weekly_frequency_array(dhf_path)
+        self.df_error_threshold = 100
+        self.dhf_error_threshold = 30
         # Numerics initial parameters
         self.Lambda_M = 41933.0 * 7.0
         self.beta_M = 0.001372700
@@ -63,7 +59,7 @@ class StochasticSearch(data_processing.DataProcessing):
         self.sigma = 0.42264415014285717 * 7.0
         self.p = 0.050000
         self.theta = 0.086764968
-        self.z_max = 1000
+        self.peak_df_cases = 1000
         #
         #
         self.M_s0 = 120000.000000
@@ -94,37 +90,50 @@ class StochasticSearch(data_processing.DataProcessing):
         self.t = np.linspace(self.t0, self.T, self.grid_size)
         self.solution = np.zeros([len(self.t), 13])
         #
-        self.fitting_error_DF = 0.0
-        self.fitting_error_DHF = 0.0
-        self.r_zero_cond = False
-        self.fitting_error_DF_cond = False
-        self.fitting_error_DHF_cond = False
-        self.stop_condition = False
+        self.df_fit_error = 0.0
+        self.dhf_fit_error = 0.0
+        self.meets_r_zero_threshold = False
+        self.meets_df_error_threshold = False
+        self.meets_dhf_error_threshold = False
+        self.meets_acceptance_criteria = False
 
-    def update_conditions_search(self):
+    @staticmethod
+    def read_weekly_frequency_array(path: Path) -> np.ndarray:
+        """Load a weekly frequency CSV, accepting integer or date-like week labels."""
+        frame = pd.read_csv(path)
+        week = pd.to_numeric(frame["week"], errors="coerce")
+        if week.isna().any():
+            week = pd.to_datetime(frame["week"]).dt.isocalendar().week.astype(int)
+        counts = pd.to_numeric(frame["count"]).astype(int)
+        return np.column_stack([week.astype(int).to_numpy(), counts.to_numpy()])
+
+    def evaluate_search_acceptance(self):
         """Evaluate whether the current sample satisfies acceptance criteria."""
-        r_zero_cond = (self.r_zero > 1)
-        fitting_error_DF_cond = (self.fitting_error_DF < self.bound_error_FD)
-        fitting_error_DHF_cond = (self.fitting_error_DHF
-                                  < self.bound_error_FHD)
-        max_infected_class_cond = (self.z_max < 700)
-        stop_condition = (fitting_error_DF_cond and fitting_error_DHF_cond) \
-                         and r_zero_cond and max_infected_class_cond
+        meets_r_zero_threshold = self.r_zero > 1
+        meets_df_error_threshold = self.df_fit_error < self.df_error_threshold
+        meets_dhf_error_threshold = self.dhf_fit_error < self.dhf_error_threshold
+        meets_peak_df_threshold = self.peak_df_cases < 700
+        meets_acceptance_criteria = (
+            meets_df_error_threshold
+            and meets_dhf_error_threshold
+            and meets_r_zero_threshold
+            and meets_peak_df_threshold
+        )
 
-        self.stop_condition = stop_condition
-        self.r_zero_cond = r_zero_cond
-        self.fitting_error_DF_cond = fitting_error_DF_cond
-        self.fitting_error_DHF_cond = fitting_error_DHF_cond
-        return stop_condition
+        self.meets_acceptance_criteria = meets_acceptance_criteria
+        self.meets_r_zero_threshold = meets_r_zero_threshold
+        self.meets_df_error_threshold = meets_df_error_threshold
+        self.meets_dhf_error_threshold = meets_dhf_error_threshold
+        return meets_acceptance_criteria
 
-    def fitting_plot(self):
+    def save_fitting_plot(self):
         """Write the DF/DHF fitting comparison figure to ``runtime_dir``."""
         t = self.t
         Y_m1_h = self.solution[:, 8]
         z = self.solution[:, 9]
         #
-        t_data_DF = self.frecuency_per_week_DF[3:, 0]
-        t_data_DHF = self.frecuency_per_week_DHF[1:, 0]
+        t_data_DF = self.weekly_df_frequency_array[3:, 0]
+        t_data_DHF = self.weekly_dhf_frequency_array[1:, 0]
         offset = 10000
         #
         t_z = t[0: -1: offset]
@@ -146,20 +155,12 @@ class StochasticSearch(data_processing.DataProcessing):
         Y_m1_h_points = np.delete(Y_m1_h_points, delte_index_t_Y)
 
         #
-        frecuency_per_week_DF = self.frecuency_per_week_DF[3:, 1]
-        frecuency_per_week_DHF = self.frecuency_per_week_DHF[1:, 1]
-        '''
-        fitting_error_DF = \
-            np.linalg.norm(frecuency_per_week_DF - z_points, ord=np.inf)
-        self.fitting_error_DF = fitting_error_DF
-        fitting_error_DHF = \
-            np.linalg.norm(frecuency_per_week_DHF - Y_m1_h_points, ord=np.inf)
-        self.fitting_error_DHF = fitting_error_DHF
-        '''
+        frequency_per_week_DF = self.weekly_df_frequency_array[3:, 1]
+        frequency_per_week_DHF = self.weekly_dhf_frequency_array[1:, 1]
         #
         f1, ax_array = plt.subplots(2, 2, sharex=True)
 
-        def _padded_limits(*arrays, pad=0.1, floor=None):
+        def calculate_padded_limits(*arrays, pad=0.1, floor=None):
             stacked = np.concatenate([np.asarray(a).ravel() for a in arrays if len(a) > 0])
             data_range = stacked.max() - stacked.min()
             pad_val = data_range * pad if data_range > 0 else pad
@@ -169,17 +170,17 @@ class StochasticSearch(data_processing.DataProcessing):
             return lower, stacked.max() + pad_val
 
         # Use dynamic y-limits so raw_data and simulation are both visible.
-        df_ymin, df_ymax = _padded_limits(frecuency_per_week_DF, z_points, pad=0.15, floor=0.0)
-        dhf_ymin, dhf_ymax = _padded_limits(frecuency_per_week_DHF, Y_m1_h_points, pad=0.15, floor=0.0)
-        df_xmin, df_xmax = _padded_limits(t_data_DF, t_z, pad=0.02)
-        dhf_xmin, dhf_xmax = _padded_limits(t_data_DHF, t_Y_m1_h, pad=0.02)
+        df_ymin, df_ymax = calculate_padded_limits(frequency_per_week_DF, z_points, pad=0.15, floor=0.0)
+        dhf_ymin, dhf_ymax = calculate_padded_limits(frequency_per_week_DHF, Y_m1_h_points, pad=0.15, floor=0.0)
+        df_xmin, df_xmax = calculate_padded_limits(t_data_DF, t_z, pad=0.02)
+        dhf_xmin, dhf_xmax = calculate_padded_limits(t_data_DHF, t_Y_m1_h, pad=0.02)
 
         ax_array[0, 0].plot(t, z, 'b-')
         ax_array[0, 0].set_title(r'Reported DF ')
         ax_array[0, 0].set_xlim(df_xmin, df_xmax)
         ax_array[0, 0].set_ylim(df_ymin, df_ymax)
 
-        ax_array[0, 1].plot(t_data_DF, frecuency_per_week_DF,
+        ax_array[0, 1].plot(t_data_DF, frequency_per_week_DF,
                             ls='--',
                             color='lightblue',
                             marker='o',
@@ -198,7 +199,7 @@ class StochasticSearch(data_processing.DataProcessing):
                             mfc='blue',
                             alpha=0.5)
         ax_array[0, 1].text(27, 300,
-                            'err=' + str(np.round(self.fitting_error_DF, 1)),
+                            'err=' + str(np.round(self.df_fit_error, 1)),
                             fontsize=10
                             )
         ax_array[0, 1].set_ylim(df_ymin, df_ymax)
@@ -210,7 +211,7 @@ class StochasticSearch(data_processing.DataProcessing):
         ax_array[1, 0].set_title(r'DHF')
         ax_array[1, 0].set_xlim(dhf_xmin, dhf_xmax)
         ax_array[1, 0].set_ylim(dhf_ymin, dhf_ymax)
-        ax_array[1, 1].plot(t_data_DHF, frecuency_per_week_DHF,
+        ax_array[1, 1].plot(t_data_DHF, frequency_per_week_DHF,
                             ls='--',
                             color='orange',
                             marker='o',
@@ -228,7 +229,7 @@ class StochasticSearch(data_processing.DataProcessing):
                             marker='*'
                             )
         ax_array[1, 1].text(27, 50,
-                            'err=' + str(np.round(self.fitting_error_DHF, 1)),
+                            'err=' + str(np.round(self.dhf_fit_error, 1)),
                             fontsize=10
                             )
         ax_array[1, 1].set_ylim(dhf_ymin, dhf_ymax)
@@ -244,15 +245,15 @@ class StochasticSearch(data_processing.DataProcessing):
         plt.savefig(self.plots_dir / 'fitting_DF_DHF.png')
         plt.close(f1)
 
-    def plot_input_data(self):
+    def save_input_data_plot(self):
         """Plot daily DF and DHF case time series from CSVs in two stacked axes.
 
-        Reads ``cases_per_date_FD.csv`` and ``cases_per_date_FHD.csv`` from
+        Reads ``incidence_data_DF.csv`` and ``incidence_data_DHF.csv`` from
         ``self.data_dir`` with the first column parsed as dates. Produces a
         2-row by 1-column figure saved to ``plots/input_cases_timeseries.png``.
         """
-        df_fd_path = self.data_dir / 'incidence_data_FD.csv'
-        df_fhd_path = self.data_dir / 'incidence_data_FHD.csv'
+        df_fd_path = self.data_dir / 'incidence_data_DF.csv'
+        df_fhd_path = self.data_dir / 'incidence_data_DHF.csv'
 
         # Expect two columns: date, label. Parse the first as datetime.
         # Date strings are in M/D/YYYY format. FHD file already contains a header.
@@ -272,7 +273,7 @@ class StochasticSearch(data_processing.DataProcessing):
             parse_dates=['date'],
             date_format=date_format,
         )
-        def _week_counts(frame: pd.DataFrame) -> pd.DataFrame:
+        def summarize_cases_by_week_start(frame: pd.DataFrame) -> pd.DataFrame:
             # Convert each record's date to the start of its ISO week to retain a
             # calendar-aware type (Timestamp) instead of a plain integer week
             # number. This keeps downstream CSVs and plots date-typed weeks.
@@ -281,14 +282,14 @@ class StochasticSearch(data_processing.DataProcessing):
             counts.rename(columns={counts.columns[0]: 'week'}, inplace=True)
             return counts
 
-        freq_df = _week_counts(df_fd)
-        freq_dhf = _week_counts(df_fhd)
+        freq_df = summarize_cases_by_week_start(df_fd)
+        freq_dhf = summarize_cases_by_week_start(df_fhd)
         # Ensure week column is explicitly datetime-typed (start of week).
         freq_df['week'] = pd.to_datetime(freq_df['week'])
         freq_dhf['week'] = pd.to_datetime(freq_dhf['week'])
-        freq_df.to_csv(self._data_path('frecuency_per_week_DF.csv'),
+        freq_df.to_csv(self.build_data_file_path('frequency_per_week_DF.csv'),
                        index=False)
-        freq_dhf.to_csv(self._data_path('frecuency_per_week_DHF.csv'),
+        freq_dhf.to_csv(self.build_data_file_path('frequency_per_week_DHF.csv'),
                         index=False)
 
         fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 6),
@@ -326,7 +327,7 @@ class StochasticSearch(data_processing.DataProcessing):
         plt.savefig(self.plots_dir / 'input_cases_timeseries.png')
         plt.close(fig)
 
-    def fitting_error(self):
+    def compute_fitting_errors(self):
         """Compute the current DF and DHF fitting errors from the ODE solution."""
         #
         #
@@ -334,11 +335,11 @@ class StochasticSearch(data_processing.DataProcessing):
         t = self.t
         Y_m1_h = self.solution[:, 8]
         z = self.solution[:, 9]
-        self.z_max = np.max(z)
+        self.peak_df_cases = np.max(z)
         phase = 12
         #
-        t_data_DF = self.frecuency_per_week_DF[3:, 0]
-        t_data_DHF = self.frecuency_per_week_DHF[1:, 0]
+        t_data_DF = self.weekly_df_frequency_array[3:, 0]
+        t_data_DHF = self.weekly_dhf_frequency_array[1:, 0]
         offset = 10000
         #
         t_z = t[0: -1: offset]
@@ -360,21 +361,21 @@ class StochasticSearch(data_processing.DataProcessing):
         Y_m1_h_points = np.delete(Y_m1_h_points, delte_index_t_Y)
         #
         #
-        frecuency_per_week_DF = self.frecuency_per_week_DF[3:, 1]
-        frecuency_per_week_DHF = self.frecuency_per_week_DHF[1:, 1]
+        frequency_per_week_DF = self.weekly_df_frequency_array[3:, 1]
+        frequency_per_week_DHF = self.weekly_dhf_frequency_array[1:, 1]
         fitting_error_DF = \
-            np.linalg.norm(frecuency_per_week_DF[0: phase]
+            np.linalg.norm(frequency_per_week_DF[0: phase]
                            - z_points[0: phase], ord=np.inf) \
-            # / np.linalg.norm(frecuency_per_week_DF[0: phase], ord=2)
-        self.fitting_error_DF = fitting_error_DF
+            # / np.linalg.norm(frequency_per_week_DF[0: phase], ord=2)
+        self.df_fit_error = fitting_error_DF
         fitting_error_DHF = \
-            np.linalg.norm(frecuency_per_week_DHF[0: phase]
+            np.linalg.norm(frequency_per_week_DHF[0: phase]
                            - Y_m1_h_points[0: phase], ord=np.inf)  \
-            # / np.linalg.norm(frecuency_per_week_DHF[0: phase], ord=2)
-        self.fitting_error_DHF = fitting_error_DHF
+            # / np.linalg.norm(frequency_per_week_DHF[0: phase], ord=2)
+        self.dhf_fit_error = fitting_error_DHF
 
     @staticmethod
-    def f_rhs(x, t, Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b,
+    def compute_ode_rhs(x, t, Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b,
               mu_M, mu_H, alpha_c, alpha_h, sigma, p, theta, q):
         """Right-hand side of the compartmental ODE system."""
         M_s = x[0]
@@ -430,7 +431,7 @@ class StochasticSearch(data_processing.DataProcessing):
         dydt = dydt.astype('float64')
         return dydt
 #
-    def ode_int_solution(self):
+    def solve_ode_system(self):
         """Integrate the model ODE system over the configured time grid."""
         T = self.T
         t0 = self.t0
@@ -459,7 +460,7 @@ class StochasticSearch(data_processing.DataProcessing):
         #
         #
         #
-        y = integrate.odeint(self.f_rhs, y_0, t,
+        y = integrate.odeint(self.compute_ode_rhs, y_0, t,
                              args=(Lambda_M, Lambda_S, Lambda_S_m1,
                                    beta_M, beta_H, b, mu_M, mu_H, alpha_c,
                                    alpha_h, sigma, p, theta, q))
@@ -467,7 +468,7 @@ class StochasticSearch(data_processing.DataProcessing):
         self.t = t
         return y
 
-    def parameters_sampling(self, flag_deterministic=False):
+    def sample_model_parameters(self, flag_deterministic=False):
         """Sample a new parameter set and update the model state in place.
 
         Parameters
@@ -614,7 +615,7 @@ class StochasticSearch(data_processing.DataProcessing):
         new_parameters = np.array(new_parameters)
         return new_parameters
 
-    def save_parameters(self, file_name_prefix=None):
+    def save_parameter_snapshot(self, file_name_prefix=None):
         """Persist the current parameter state as a YAML snapshot."""
 
         # load parameters
@@ -668,7 +669,7 @@ class StochasticSearch(data_processing.DataProcessing):
         with open(file_name, 'w') as outfile:
             yaml.safe_dump(parameters, outfile, default_flow_style=False)
 
-    def compute_r_zero(self):
+    def compute_basic_reproduction_numbers(self):
         """Compute the basic reproduction number and its two components."""
         # load parameters
         Lambda_M = self.Lambda_M
@@ -708,7 +709,7 @@ class StochasticSearch(data_processing.DataProcessing):
         self.r_zero = r_zero
         return np.sqrt(r_01), np.sqrt(r_02), r_zero
 
-    def solution_plot(self):
+    def save_solution_plots(self):
         """Write compartment population plots for the current ODE solution."""
 
         M_s = self.solution[:, 0]
@@ -806,7 +807,7 @@ class StochasticSearch(data_processing.DataProcessing):
         plt.savefig(self.plots_dir / 'DF_DHF.png')
         plt.close(2)
 
-    def load_parameters(self, file_name):
+    def load_parameter_snapshot(self, file_name):
         """Load model parameters from a YAML file into the current instance."""
         with open(file_name, 'r') as f:
             parameter_data = yaml.safe_load(f)

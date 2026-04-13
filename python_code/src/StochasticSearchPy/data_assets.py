@@ -2,7 +2,7 @@
 
 The package itself ships code only. Reference data stays in the repository
 under ``data/reference/raw_data`` and can be copied into a runtime directory
-with :func:`prepare_data_directory`.
+with :func:`copy_reference_dataset`.
 """
 
 import os
@@ -14,8 +14,6 @@ DATA_DIR_ENV_VAR = "TWO_STRAINS_DENGUE_DATA_DIR"
 REFERENCE_DATA_RELATIVE_PATH = Path("data/reference/raw_data")
 CORE_MODEL_FILES = (
     "dengue_data_2010.sqlite",
-    "frecuency_per_week_DF.dat",
-    "frecuency_per_week_DHF.dat",
 )
 REFERENCE_DATA_FILES = (
     "NOMINAL DENGUE 2015.xlsx",
@@ -27,15 +25,9 @@ REFERENCE_DATA_FILES = (
     "cases_per_date_FHD.csv",
     "casos_dengue_2010_AGEB2010.csv",
     "casos_dengue_2010_AGEB2010.dbf",
-    "dengue_c_her2010.dat",
     "dengue_data_2010.sqlite",
-    "dengue_h_her2010.dat",
-    "frecuency_per_day_per_week_FD.dat",
-    "frecuency_per_day_per_week_FHD.dat",
-    "frecuency_per_week_DF.csv",
-    "frecuency_per_week_DF.dat",
-    "frecuency_per_week_DHF.csv",
-    "frecuency_per_week_DHF.dat",
+    "frequency_per_week_DF.csv",
+    "frequency_per_week_DHF.csv",
     "incidence_data.csv",
     "incidence_data_2010_fever_classification.csv",
     "incidence_data_2015.csv",
@@ -48,17 +40,17 @@ REFERENCE_DATA_FILES = (
 )
 
 
-def repo_root() -> Path:
+def get_repository_root() -> Path:
     """Return the repository root for a source checkout."""
     return Path(__file__).resolve().parents[2]
 
 
-def repo_reference_data_dir() -> Path:
+def get_reference_data_directory() -> Path:
     """Return the committed reference dataset directory."""
-    return repo_root() / REFERENCE_DATA_RELATIVE_PATH
+    return get_repository_root() / REFERENCE_DATA_RELATIVE_PATH
 
 
-def default_data_dir() -> Path | None:
+def get_default_data_directory() -> Path | None:
     """Resolve the default data directory for local runs.
 
     Resolution order:
@@ -69,13 +61,13 @@ def default_data_dir() -> Path | None:
     if env_data_dir:
         return Path(env_data_dir).expanduser()
 
-    reference_dir = repo_reference_data_dir()
+    reference_dir = get_reference_data_directory()
     if reference_dir.exists():
         return reference_dir
     return None
 
 
-def resolve_reference_source_dir(source_dir=None) -> Path:
+def resolve_reference_source_directory(source_dir=None) -> Path:
     """Resolve the source directory used by ``prepare-data``.
 
     Parameters
@@ -87,7 +79,7 @@ def resolve_reference_source_dir(source_dir=None) -> Path:
     if source_dir is not None:
         return Path(source_dir).expanduser()
 
-    reference_dir = repo_reference_data_dir()
+    reference_dir = get_reference_data_directory()
     if reference_dir.exists():
         return reference_dir
 
@@ -97,7 +89,7 @@ def resolve_reference_source_dir(source_dir=None) -> Path:
     )
 
 
-def resolve_data_dir(data_dir=None, create=False) -> Path:
+def resolve_data_directory(data_dir=None, create=False) -> Path:
     """Resolve a runtime data directory for model execution.
 
     Parameters
@@ -113,7 +105,7 @@ def resolve_data_dir(data_dir=None, create=False) -> Path:
             resolved.mkdir(parents=True, exist_ok=True)
         return resolved
 
-    resolved = default_data_dir()
+    resolved = get_default_data_directory()
     if resolved is not None:
         return resolved
 
@@ -124,7 +116,7 @@ def resolve_data_dir(data_dir=None, create=False) -> Path:
     )
 
 
-def ensure_required_files(data_dir, file_names, label="data directory"):
+def validate_required_files_exist(data_dir, file_names, label="data directory"):
     """Validate that a directory contains the expected data files."""
     data_path = Path(data_dir)
     missing_files = [name for name in file_names if not (data_path / name).exists()]
@@ -134,7 +126,7 @@ def ensure_required_files(data_dir, file_names, label="data directory"):
     return data_path
 
 
-def prepare_data_directory(output_dir, source_dir=None) -> tuple[Path, Path, list[Path]]:
+def copy_reference_dataset(output_dir, source_dir=None) -> tuple[Path, Path, list[Path]]:
     """Copy the committed reference dataset into a writable runtime directory.
 
     Parameters
@@ -151,8 +143,8 @@ def prepare_data_directory(output_dir, source_dir=None) -> tuple[Path, Path, lis
         The resolved source directory, resolved output directory, and copied
         file paths.
     """
-    source_path = resolve_reference_source_dir(source_dir)
-    ensure_required_files(
+    source_path = resolve_reference_source_directory(source_dir)
+    validate_required_files_exist(
         source_path,
         REFERENCE_DATA_FILES,
         label="reference data directory",

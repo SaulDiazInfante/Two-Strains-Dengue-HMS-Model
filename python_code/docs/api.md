@@ -7,7 +7,7 @@ from StochasticSearchPy import (
     DATA_DIR_ENV_VAR,
     DataProcessing,
     StochasticSearch,
-    prepare_data_directory,
+    copy_reference_dataset,
 )
 ```
 
@@ -22,9 +22,11 @@ Primary responsibilities:
 Common methods:
 
 - `DataProcessing(data_dir=None)`: open the configured dataset
-- `incidence_frequency_tables()`: return weekly DF/DHF tables as pandas DataFrames
-- `frecuency_per_day_and_week()`: generate the legacy `.dat` files used by the model
-- `close()`: release the SQLite connection
+- `build_daily_frequency_tables()`: return per-date DF/DHF frequency tables and save them as CSV
+- `build_weekly_frequency_tables()`: return per-week DF/DHF frequency tables and save them as CSV
+- `build_weekly_frequency_arrays()`: return weekly DF/DHF frequency tables as NumPy arrays
+- `export_incidence_rows_with_weeks()`: export per-case incidence rows with their epidemiological weeks
+- `close_database_connection()`: release the SQLite connection
 
 ## `StochasticSearch`
 
@@ -38,15 +40,15 @@ Primary responsibilities:
 Common methods:
 
 - `StochasticSearch(data_dir=None, runtime_dir=None)`: initialize the model
-- `ode_int_solution()`: run the ODE solver
-- `fitting_error()`: compute DF/DHF fit errors
-- `compute_r_zero()`: compute the reproduction number components
-- `solution_plot()` and `fitting_plot()`: write plots
-- `save_parameters(path_prefix=None)`: write a YAML parameter snapshot
+- `solve_ode_system()`: run the ODE solver
+- `compute_fitting_errors()`: compute DF/DHF fit errors
+- `compute_basic_reproduction_numbers()`: compute the reproduction number components
+- `save_solution_plots()` and `save_fitting_plot()`: write plots
+- `save_parameter_snapshot(file_name_prefix=None)`: write a YAML parameter snapshot
 
 ## Data helpers
 
-- `prepare_data_directory(output_dir, source_dir=None)`: copy the committed
+- `copy_reference_dataset(output_dir, source_dir=None)`: copy the committed
   reference dataset into a writable working directory
 - `DATA_DIR_ENV_VAR`: environment variable name,
   `TWO_STRAINS_DENGUE_DATA_DIR`

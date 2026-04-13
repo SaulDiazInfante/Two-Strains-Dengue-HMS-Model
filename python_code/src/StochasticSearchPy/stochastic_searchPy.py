@@ -3,10 +3,10 @@
 import sys
 
 try:
-    from .cli import main
+    from .cli import run_cli
 except ImportError:
-    from cli import main
+    from cli import run_cli
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(["search", *sys.argv[1:]]))
+    raise SystemExit(run_cli(["search", *sys.argv[1:]]))

@@ -9,21 +9,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 try:
-    from .data_assets import prepare_data_directory
+    from .data_assets import copy_reference_dataset
     from .data_processing import DataProcessing
     from .stochastic_search import StochasticSearch
 except ImportError:
-    from data_assets import prepare_data_directory
+    from data_assets import copy_reference_dataset
     from data_processing import DataProcessing
     from stochastic_search import StochasticSearch
 
 
-def _timestamp() -> str:
+def build_timestamp_string() -> str:
     """Return a filesystem-safe timestamp used in generated artifact names."""
     return datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
         prog="two-strains-dengue",
@@ -37,14 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     smoke.add_argument("--data-dir", type=Path, default=None)
     smoke.add_argument("--runtime-dir", type=Path, default=None)
-    smoke.set_defaults(func=run_smoke)
+    smoke.set_defaults(func=run_smoke_command)
 
     tables = subparsers.add_parser(
         "frequency-tables",
         help="Generate weekly DF and DHF frequency tables from incidence CSVs.",
     )
     tables.add_argument("--data-dir", type=Path, default=None)
-    tables.set_defaults(func=run_frequency_tables)
+    tables.set_defaults(func=run_frequency_tables_command)
 
     prepare_data = subparsers.add_parser(
         "prepare-data",
@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("artifacts/data"),
     )
-    prepare_data.set_defaults(func=run_prepare_data)
+    prepare_data.set_defaults(func=run_prepare_data_command)
 
     search = subparsers.add_parser(
         "search",
@@ -67,15 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--samples", type=int, default=1)
     search.add_argument("--bound-error-fd", type=float, default=100.0)
     search.add_argument("--bound-error-fhd", type=float, default=25.0)
-    search.set_defaults(func=run_search)
+    search.set_defaults(func=run_search_command)
 
     return parser
 
 
-def run_smoke(args) -> int:
+def run_smoke_command(args) -> int:
     """Run a lightweight model instantiation check and print R0 metrics."""
     sim = StochasticSearch(data_dir=args.data_dir, runtime_dir=args.runtime_dir)
-    r01_per_week, r02_per_week, r0_per_week = sim.compute_r_zero()
+    r01_per_week, r02_per_week, r0_per_week = sim.compute_basic_reproduction_numbers()
     print(f"data_dir={sim.data_dir}")
     print(f"runtime_dir={sim.runtime_dir}")
     print(
@@ -88,24 +88,24 @@ def run_smoke(args) -> int:
     return 0
 
 
-def run_frequency_tables(args) -> int:
+def run_frequency_tables_command(args) -> int:
     """Generate weekly DF and DHF frequency tables from incidence CSV files."""
     with DataProcessing(data_dir=args.data_dir) as processor:
-        freq_df, freq_dhf = processor.incidence_frequency_tables()
+        freq_df, freq_dhf = processor.build_weekly_frequency_tables()
         data_dir = processor.data_dir
     print(
         "generated={} and {}".format(
-            data_dir / "frecuency_per_week_DF.csv",
-            data_dir / "frecuency_per_week_DHF.csv",
+            data_dir / "frequency_per_week_DF.csv",
+            data_dir / "frequency_per_week_DHF.csv",
         )
     )
     print(f"df_rows={len(freq_df)} dhf_rows={len(freq_dhf)}")
     return 0
 
 
-def run_prepare_data(args) -> int:
+def run_prepare_data_command(args) -> int:
     """Copy the committed reference dataset into a working data directory."""
-    source_dir, output_dir, copied_files = prepare_data_directory(
+    source_dir, output_dir, copied_files = copy_reference_dataset(
         output_dir=args.output_dir,
         source_dir=args.source_dir,
     )
@@ -115,17 +115,17 @@ def run_prepare_data(args) -> int:
     return 0
 
 
-def run_search(args) -> int:
+def run_search_command(args) -> int:
     """Execute the stochastic search workflow and persist generated artifacts."""
     sim = StochasticSearch(data_dir=args.data_dir, runtime_dir=args.runtime_dir)
-    sim.number_of_samples = args.samples
-    sim.bound_error_FD = args.bound_error_fd
-    sim.bound_error_FHD = args.bound_error_fhd
-    sim.incidence_frequency_tables()
+    sim.sample_count = args.samples
+    sim.df_error_threshold = args.bound_error_fd
+    sim.dhf_error_threshold = args.bound_error_fhd
+    sim.build_weekly_frequency_tables()
 
     print(
         "%-8s%-12s%-12s%-12s%-12s%-12s%-12s"
-        % ("i", "R_01", "R_02", "R_zero", "error_DF", "error_DHF", "z_max")
+        % ("i", "R_01", "R_02", "R_zero", "error_DF", "error_DHF", "peak_DF")
     )
 
     samples = {
@@ -135,21 +135,21 @@ def run_search(args) -> int:
         "r0": [],
         "err_df": [],
         "err_dhf": [],
-        "zmax": [],
+        "peak_df_cases": [],
         "accepted": [],
     }
 
     accepted_index = None
     accepted_log = sim.runtime_dir / "accepted_samples.txt"
 
-    for i in np.arange(sim.number_of_samples):
-        sim.parameters_sampling(flag_deterministic=False)
-        sim.ode_int_solution()
-        sim.fitting_error()
-        error_df = sim.fitting_error_DF
-        error_dhf = sim.fitting_error_DHF
-        r01_per_week, r02_per_week, r0_per_week = sim.compute_r_zero()
-        stop = sim.update_conditions_search()
+    for i in np.arange(sim.sample_count):
+        sim.sample_model_parameters(flag_deterministic=False)
+        sim.solve_ode_system()
+        sim.compute_fitting_errors()
+        error_df = sim.df_fit_error
+        error_dhf = sim.dhf_fit_error
+        r01_per_week, r02_per_week, r0_per_week = sim.compute_basic_reproduction_numbers()
+        stop = sim.evaluate_search_acceptance()
 
         samples["i"].append(i)
         samples["r01"].append(r01_per_week)
@@ -157,7 +157,7 @@ def run_search(args) -> int:
         samples["r0"].append(r0_per_week)
         samples["err_df"].append(error_df)
         samples["err_dhf"].append(error_dhf)
-        samples["zmax"].append(sim.z_max)
+        samples["peak_df_cases"].append(sim.peak_df_cases)
         samples["accepted"].append(stop)
 
         print(
@@ -169,16 +169,16 @@ def run_search(args) -> int:
                 r0_per_week,
                 error_df,
                 error_dhf,
-                sim.z_max,
+                sim.peak_df_cases,
             )
         )
 
         if stop and accepted_index is None:
             accepted_index = i
-            sim.solution_plot()
-            sim.fitting_plot()
-            sim.save_parameters()
-            timestamp = _timestamp()
+            sim.save_solution_plots()
+            sim.save_fitting_plot()
+            sim.save_parameter_snapshot()
+            timestamp = build_timestamp_string()
             fit_file = sim.plots_dir / f"fitting_DF_DHF_{timestamp}.png"
             pop_file = sim.plots_dir / f"populations_grid_{timestamp}.png"
             shutil.copy2(sim.plots_dir / "fitting_DF_DHF.png", fit_file)
@@ -206,16 +206,16 @@ def run_search(args) -> int:
     plt.tight_layout()
     plt.savefig(sim.plots_dir / "accepted_samples.png")
     plt.close()
-    sim.plot_input_data()
+    sim.save_input_data_plot()
     return 0
 
 
-def main(argv=None) -> int:
+def run_cli(argv=None) -> int:
     """Run the CLI and return the selected subcommand exit code."""
-    parser = build_parser()
+    parser = build_cli_parser()
     args = parser.parse_args(argv)
     return args.func(args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())

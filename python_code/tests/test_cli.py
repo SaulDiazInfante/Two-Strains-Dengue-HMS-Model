@@ -1,11 +1,11 @@
 from StochasticSearchPy import data_assets
-from StochasticSearchPy.cli import main
+from StochasticSearchPy.cli import run_cli
 
 
 def test_smoke_command_runs_with_explicit_data_dir(tmp_path, sample_data_dir, capsys):
     runtime_dir = tmp_path / "runtime"
 
-    exit_code = main(
+    exit_code = run_cli(
         [
             "smoke",
             "--data-dir",
@@ -21,7 +21,7 @@ def test_smoke_command_runs_with_explicit_data_dir(tmp_path, sample_data_dir, ca
 
 
 def test_frequency_tables_command_writes_output(sample_data_dir, capsys):
-    exit_code = main(["frequency-tables", "--data-dir", str(sample_data_dir)])
+    exit_code = run_cli(["frequency-tables", "--data-dir", str(sample_data_dir)])
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -35,7 +35,7 @@ def test_prepare_data_command_copies_reference_files(tmp_path, monkeypatch, caps
     (source_dir / "alpha.csv").write_text("alpha", encoding="utf-8")
     monkeypatch.setattr(data_assets, "REFERENCE_DATA_FILES", ("alpha.csv",))
 
-    exit_code = main(
+    exit_code = run_cli(
         [
             "prepare-data",
             "--source-dir",

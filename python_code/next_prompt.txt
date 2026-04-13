@@ -1,0 +1,47 @@
+Use this shorter handoff prompt:
+
+  Resume work in:
+
+  /home/saul/second_nvme_drive/Two-Strains-Dengue-HMS-Model/python_code
+
+  Start by inspecting the workspace and git status. Do not revert local changes.
+
+  Project state:
+  - Packaged under `src/StochasticSearchPy`
+  - CI/CD and GitHub Pages already configured
+  - Public API renamed to verb-based names
+  - Internal state names in `data_processing.py` and `stochastic_search.py` were cleaned up
+  - Last verified result: `python -m pytest -q` -> `20 passed`
+
+  Keep these current names:
+  - `copy_reference_dataset`
+  - `build_cli_parser`, `run_cli`
+  - `build_daily_frequency_tables`
+  - `build_weekly_frequency_tables`
+  - `build_weekly_frequency_arrays`
+  - `export_incidence_rows_with_weeks`
+  - `compute_basic_reproduction_numbers`
+  - `solve_ode_system`
+  - `sample_model_parameters`
+  - `save_parameter_snapshot`
+  - `save_solution_plots`
+  - `save_fitting_plot`
+
+  Current internal state names include:
+  - `df_incidence_rows`, `dhf_incidence_rows`
+  - `daily_df_frequency_table`, `daily_dhf_frequency_table`
+  - `weekly_df_frequency_table`, `weekly_dhf_frequency_table`
+  - `weekly_df_frequency_array`, `weekly_dhf_frequency_array`
+  - `sample_count`
+  - `df_error_threshold`, `dhf_error_threshold`
+  - `df_fit_error`, `dhf_fit_error`
+  - `peak_df_cases`
+  - `meets_acceptance_criteria`
+
+  Do not rename scientific equation symbols like `Lambda_M`, `beta_H`, `S_m1_0`, etc.
+
+  Next task:
+  - Improve remaining local variable names and readability in `src/StochasticSearchPy/stochastic_search.py`
+  - Preserve behavior
+  - Update tests/docs only if required
+  - Run tests and summarize the result

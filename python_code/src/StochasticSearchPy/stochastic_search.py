@@ -126,39 +126,41 @@ class StochasticSearch(data_processing.DataProcessing):
         self.meets_dhf_error_threshold = meets_dhf_error_threshold
         return meets_acceptance_criteria
 
+    @staticmethod
+    def _sample_weekly_solution_points(
+        time_grid: np.ndarray,
+        solution_values: np.ndarray,
+        sample_stride: int,
+        trim_indices: list[int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample a solution series at the weekly locations used during fitting."""
+        sampled_weeks = np.round(time_grid[:-1:sample_stride]).astype(int)
+        sampled_values = solution_values[:-1:sample_stride]
+        return (
+            np.delete(sampled_weeks, trim_indices),
+            np.delete(sampled_values, trim_indices),
+        )
+
     def save_fitting_plot(self):
         """Write the DF/DHF fitting comparison figure to ``runtime_dir``."""
-        t = self.t
+        time_grid = self.t
         Y_m1_h = self.solution[:, 8]
         z = self.solution[:, 9]
-        #
-        t_data_DF = self.weekly_df_frequency_array[3:, 0]
-        t_data_DHF = self.weekly_dhf_frequency_array[1:, 0]
-        offset = 10000
-        #
-        t_z = t[0: -1: offset]
-        t_z = np.round(t_z)
-        t_z = t_z.astype(int)
-        z_points = z[0:-1: offset]
+        df_observed_weeks = self.weekly_df_frequency_array[3:, 0]
+        dhf_observed_weeks = self.weekly_dhf_frequency_array[1:, 0]
+        weekly_df_counts = self.weekly_df_frequency_array[3:, 1]
+        weekly_dhf_counts = self.weekly_dhf_frequency_array[1:, 1]
+        sample_stride = 10000
+        df_trim_indices = [0, 1, 6, 9]
+        dhf_trim_indices = [0, 1, 3, 4, 6, 7, 8]
+        sampled_df_weeks, sampled_df_counts = self._sample_weekly_solution_points(
+            time_grid, z, sample_stride, df_trim_indices
+        )
+        sampled_dhf_weeks, sampled_dhf_counts = self._sample_weekly_solution_points(
+            time_grid, Y_m1_h, sample_stride, dhf_trim_indices
+        )
 
-        #
-        delete_index_t_z = [0, 1, 6, 9]
-        t_z = np.delete(t_z, delete_index_t_z)
-        z_points = np.delete(z_points, delete_index_t_z)
-        #
-        t_Y_m1_h = t[0: -1: offset]
-        t_Y_m1_h = np.round(t_Y_m1_h)
-        t_Y_m1_h = t_Y_m1_h.astype(int)
-        delte_index_t_Y = [0, 1, 3, 4, 6, 7, 8]
-        t_Y_m1_h = np.delete(t_Y_m1_h, delte_index_t_Y)
-        Y_m1_h_points = Y_m1_h[0: -1: offset]
-        Y_m1_h_points = np.delete(Y_m1_h_points, delte_index_t_Y)
-
-        #
-        frequency_per_week_DF = self.weekly_df_frequency_array[3:, 1]
-        frequency_per_week_DHF = self.weekly_dhf_frequency_array[1:, 1]
-        #
-        f1, ax_array = plt.subplots(2, 2, sharex=True)
+        figure, axes = plt.subplots(2, 2, sharex=True)
 
         def calculate_padded_limits(*arrays, pad=0.1, floor=None):
             stacked = np.concatenate([np.asarray(a).ravel() for a in arrays if len(a) > 0])
@@ -170,80 +172,79 @@ class StochasticSearch(data_processing.DataProcessing):
             return lower, stacked.max() + pad_val
 
         # Use dynamic y-limits so raw_data and simulation are both visible.
-        df_ymin, df_ymax = calculate_padded_limits(frequency_per_week_DF, z_points, pad=0.15, floor=0.0)
-        dhf_ymin, dhf_ymax = calculate_padded_limits(frequency_per_week_DHF, Y_m1_h_points, pad=0.15, floor=0.0)
-        df_xmin, df_xmax = calculate_padded_limits(t_data_DF, t_z, pad=0.02)
-        dhf_xmin, dhf_xmax = calculate_padded_limits(t_data_DHF, t_Y_m1_h, pad=0.02)
+        df_ymin, df_ymax = calculate_padded_limits(weekly_df_counts, sampled_df_counts, pad=0.15, floor=0.0)
+        dhf_ymin, dhf_ymax = calculate_padded_limits(weekly_dhf_counts, sampled_dhf_counts, pad=0.15, floor=0.0)
+        df_xmin, df_xmax = calculate_padded_limits(df_observed_weeks, sampled_df_weeks, pad=0.02)
+        dhf_xmin, dhf_xmax = calculate_padded_limits(dhf_observed_weeks, sampled_dhf_weeks, pad=0.02)
 
-        ax_array[0, 0].plot(t, z, 'b-')
-        ax_array[0, 0].set_title(r'Reported DF ')
-        ax_array[0, 0].set_xlim(df_xmin, df_xmax)
-        ax_array[0, 0].set_ylim(df_ymin, df_ymax)
+        axes[0, 0].plot(time_grid, z, 'b-')
+        axes[0, 0].set_title(r'Reported DF ')
+        axes[0, 0].set_xlim(df_xmin, df_xmax)
+        axes[0, 0].set_ylim(df_ymin, df_ymax)
 
-        ax_array[0, 1].plot(t_data_DF, frequency_per_week_DF,
-                            ls='--',
-                            color='lightblue',
-                            marker='o',
-                            ms=8,
-                            mfc='lightblue',
-                            alpha=0.7)
-        ax_array[0, 1].plot(t, z,
-                            ls=':',
-                            color='darkblue',
-                            alpha=0.3)
-        ax_array[0, 1].plot(t_z, z_points,
-                            ls='none',
-                            color='blue',
-                            marker='*',
-                            ms=8,
-                            mfc='blue',
-                            alpha=0.5)
-        ax_array[0, 1].text(27, 300,
-                            'err=' + str(np.round(self.df_fit_error, 1)),
-                            fontsize=10
-                            )
-        ax_array[0, 1].set_ylim(df_ymin, df_ymax)
-        ax_array[0, 1].set_xlim(df_xmin, df_xmax)
+        axes[0, 1].plot(df_observed_weeks, weekly_df_counts,
+                        ls='--',
+                        color='lightblue',
+                        marker='o',
+                        ms=8,
+                        mfc='lightblue',
+                        alpha=0.7)
+        axes[0, 1].plot(time_grid, z,
+                        ls=':',
+                        color='darkblue',
+                        alpha=0.3)
+        axes[0, 1].plot(sampled_df_weeks, sampled_df_counts,
+                        ls='none',
+                        color='blue',
+                        marker='*',
+                        ms=8,
+                        mfc='blue',
+                        alpha=0.5)
+        axes[0, 1].text(27, 300,
+                        'err=' + str(np.round(self.df_fit_error, 1)),
+                        fontsize=10
+                        )
+        axes[0, 1].set_ylim(df_ymin, df_ymax)
+        axes[0, 1].set_xlim(df_xmin, df_xmax)
+        axes[0, 1].set_title(r'DF Fitting ')
 
-        ax_array[0, 1].set_title(r'DF Fitting ')
-        #
-        ax_array[1, 0].plot(t, Y_m1_h, 'r-')
-        ax_array[1, 0].set_title(r'DHF')
-        ax_array[1, 0].set_xlim(dhf_xmin, dhf_xmax)
-        ax_array[1, 0].set_ylim(dhf_ymin, dhf_ymax)
-        ax_array[1, 1].plot(t_data_DHF, frequency_per_week_DHF,
-                            ls='--',
-                            color='orange',
-                            marker='o',
-                            ms=8,
-                            mfc='orange',
-                            alpha=0.5)
-        ax_array[1, 1].plot(t, Y_m1_h,
-                            ls=':',
-                            color='crimson',
-                            alpha=0.5
-                            )
-        ax_array[1, 1].plot(t_Y_m1_h, Y_m1_h_points,
-                            ls='none',
-                            color='crimson',
-                            marker='*'
-                            )
-        ax_array[1, 1].text(27, 50,
-                            'err=' + str(np.round(self.dhf_fit_error, 1)),
-                            fontsize=10
-                            )
-        ax_array[1, 1].set_ylim(dhf_ymin, dhf_ymax)
-        ax_array[1, 1].set_xlim(dhf_xmin, dhf_xmax)
-        ax_array[1, 1].set_title(r'DHF Fitting ')
+        axes[1, 0].plot(time_grid, Y_m1_h, 'r-')
+        axes[1, 0].set_title(r'DHF')
+        axes[1, 0].set_xlim(dhf_xmin, dhf_xmax)
+        axes[1, 0].set_ylim(dhf_ymin, dhf_ymax)
+        axes[1, 1].plot(dhf_observed_weeks, weekly_dhf_counts,
+                        ls='--',
+                        color='orange',
+                        marker='o',
+                        ms=8,
+                        mfc='orange',
+                        alpha=0.5)
+        axes[1, 1].plot(time_grid, Y_m1_h,
+                        ls=':',
+                        color='crimson',
+                        alpha=0.5
+                        )
+        axes[1, 1].plot(sampled_dhf_weeks, sampled_dhf_counts,
+                        ls='none',
+                        color='crimson',
+                        marker='*'
+                        )
+        axes[1, 1].text(27, 50,
+                        'err=' + str(np.round(self.dhf_fit_error, 1)),
+                        fontsize=10
+                        )
+        axes[1, 1].set_ylim(dhf_ymin, dhf_ymax)
+        axes[1, 1].set_xlim(dhf_xmin, dhf_xmax)
+        axes[1, 1].set_title(r'DHF Fitting ')
 
-        for i in np.arange(2):
-            ax_array[1, i].set(xlabel='week n')
-        for j in np.arange(2):
-            ax_array[j, 0].set(ylabel='Individuals')
+        for column_index in np.arange(2):
+            axes[1, column_index].set(xlabel='week n')
+        for row_index in np.arange(2):
+            axes[row_index, 0].set(ylabel='Individuals')
 
         plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=1.0)
         plt.savefig(self.plots_dir / 'fitting_DF_DHF.png')
-        plt.close(f1)
+        plt.close(figure)
 
     def save_input_data_plot(self):
         """Plot daily DF and DHF case time series from CSVs in two stacked axes.
@@ -252,52 +253,52 @@ class StochasticSearch(data_processing.DataProcessing):
         ``self.data_dir`` with the first column parsed as dates. Produces a
         2-row by 1-column figure saved to ``plots/input_cases_timeseries.png``.
         """
-        df_fd_path = self.data_dir / 'incidence_data_DF.csv'
-        df_fhd_path = self.data_dir / 'incidence_data_DHF.csv'
+        df_incidence_path = self.data_dir / 'incidence_data_DF.csv'
+        dhf_incidence_path = self.data_dir / 'incidence_data_DHF.csv'
 
         # Expect two columns: date, label. Parse the first as datetime.
-        # Date strings are in M/D/YYYY format. FHD file already contains a header.
+        # Date strings are in M/D/YYYY format. The DHF file already contains a header.
         date_format = '%m/%d/%Y'
-        df_fd = pd.read_csv(
-            df_fd_path,
+        df_case_rows = pd.read_csv(
+            df_incidence_path,
             header=0,
             names=['date', 'incidence'],
             parse_dates=['date'],
             date_format=date_format,
         )
         # Each row is a single reported case; set numeric incidence count.
-        df_fhd = pd.read_csv(
-            df_fhd_path,
+        dhf_case_rows = pd.read_csv(
+            dhf_incidence_path,
             header=0,
             names=['date', 'incidence'],
             parse_dates=['date'],
             date_format=date_format,
         )
-        def summarize_cases_by_week_start(frame: pd.DataFrame) -> pd.DataFrame:
+        def summarize_cases_by_week_start(incidence_rows: pd.DataFrame) -> pd.DataFrame:
             # Convert each record's date to the start of its ISO week to retain a
             # calendar-aware type (Timestamp) instead of a plain integer week
             # number. This keeps downstream CSVs and plots date-typed weeks.
-            week = frame['date'].dt.to_period('W').dt.start_time
-            counts = frame.groupby(week).size().reset_index(name='count')
-            counts.rename(columns={counts.columns[0]: 'week'}, inplace=True)
-            return counts
+            week_starts = incidence_rows['date'].dt.to_period('W').dt.start_time
+            weekly_counts = incidence_rows.groupby(week_starts).size().reset_index(name='count')
+            weekly_counts.rename(columns={weekly_counts.columns[0]: 'week'}, inplace=True)
+            return weekly_counts
 
-        freq_df = summarize_cases_by_week_start(df_fd)
-        freq_dhf = summarize_cases_by_week_start(df_fhd)
+        weekly_df_counts = summarize_cases_by_week_start(df_case_rows)
+        weekly_dhf_counts = summarize_cases_by_week_start(dhf_case_rows)
         # Ensure week column is explicitly datetime-typed (start of week).
-        freq_df['week'] = pd.to_datetime(freq_df['week'])
-        freq_dhf['week'] = pd.to_datetime(freq_dhf['week'])
-        freq_df.to_csv(self.build_data_file_path('frequency_per_week_DF.csv'),
-                       index=False)
-        freq_dhf.to_csv(self.build_data_file_path('frequency_per_week_DHF.csv'),
-                        index=False)
+        for weekly_counts in (weekly_df_counts, weekly_dhf_counts):
+            weekly_counts['week'] = pd.to_datetime(weekly_counts['week'])
+        weekly_df_counts.to_csv(self.build_data_file_path('frequency_per_week_DF.csv'),
+                                index=False)
+        weekly_dhf_counts.to_csv(self.build_data_file_path('frequency_per_week_DHF.csv'),
+                                 index=False)
 
         fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 6),
                                  sharex=True)
 
         axes[0].plot(
-            freq_df['week'],
-            freq_df['count'],
+            weekly_df_counts['week'],
+            weekly_df_counts['count'],
             linestyle='', marker='o', markersize=4,
             color='steelblue', alpha=0.6
         )
@@ -305,8 +306,8 @@ class StochasticSearch(data_processing.DataProcessing):
         axes[0].set_ylabel('Dengue Fever incidence')
 
         axes[1].plot(
-            freq_dhf['week'],
-            freq_dhf['count'],
+            weekly_dhf_counts['week'],
+            weekly_dhf_counts['count'],
             linestyle='', marker='o', markersize=4,
             color='tomato',
             alpha=0.6
@@ -315,13 +316,10 @@ class StochasticSearch(data_processing.DataProcessing):
         axes[1].set_ylabel('Dengue Hemorrhagic Fever incidence')
         axes[1].set_xlabel('Date')
 
-        for i, ax in enumerate(axes):
-            ax.grid(alpha=0.3, linestyle='--', linewidth=0.5)
+        for axis, weekly_counts in zip(axes, (weekly_df_counts, weekly_dhf_counts)):
+            axis.grid(alpha=0.3, linestyle='--', linewidth=0.5)
             # Tighten y-limits to keep dots visible around 1.
-            if i == 0:
-                ax.set_ylim(0.0, freq_df['count'].max() * 1.1)
-            else:
-                ax.set_ylim(0.0, freq_dhf['count'].max() * 1.1)
+            axis.set_ylim(0.0, weekly_counts['count'].max() * 1.1)
         fig.autofmt_xdate()
         plt.tight_layout()
         plt.savefig(self.plots_dir / 'input_cases_timeseries.png')
@@ -329,66 +327,48 @@ class StochasticSearch(data_processing.DataProcessing):
 
     def compute_fitting_errors(self):
         """Compute the current DF and DHF fitting errors from the ODE solution."""
-        #
-        #
-        #
-        t = self.t
+        time_grid = self.t
         Y_m1_h = self.solution[:, 8]
         z = self.solution[:, 9]
         self.peak_df_cases = np.max(z)
-        phase = 12
-        #
-        t_data_DF = self.weekly_df_frequency_array[3:, 0]
-        t_data_DHF = self.weekly_dhf_frequency_array[1:, 0]
-        offset = 10000
-        #
-        t_z = t[0: -1: offset]
-        t_z = np.round(t_z)
-        t_z = t_z.astype(int)
-        z_points = z[0:-1: offset]
-        #
-        #
-        delete_index_t_z = [0, 1, 6, 9]
-        t_z = np.delete(t_z, delete_index_t_z)
-        z_points = np.delete(z_points, delete_index_t_z)
-        #
-        t_Y_m1_h = t[0: -1: offset]
-        t_Y_m1_h = np.round(t_Y_m1_h)
-        t_Y_m1_h = t_Y_m1_h.astype(int)
-        delte_index_t_Y = [0, 1, 3, 4, 6, 7, 8]
-        t_Y_m1_h = np.delete(t_Y_m1_h, delte_index_t_Y)
-        Y_m1_h_points = Y_m1_h[0: -1: offset]
-        Y_m1_h_points = np.delete(Y_m1_h_points, delte_index_t_Y)
-        #
-        #
-        frequency_per_week_DF = self.weekly_df_frequency_array[3:, 1]
-        frequency_per_week_DHF = self.weekly_dhf_frequency_array[1:, 1]
-        fitting_error_DF = \
-            np.linalg.norm(frequency_per_week_DF[0: phase]
-                           - z_points[0: phase], ord=np.inf) \
-            # / np.linalg.norm(frequency_per_week_DF[0: phase], ord=2)
-        self.df_fit_error = fitting_error_DF
-        fitting_error_DHF = \
-            np.linalg.norm(frequency_per_week_DHF[0: phase]
-                           - Y_m1_h_points[0: phase], ord=np.inf)  \
-            # / np.linalg.norm(frequency_per_week_DHF[0: phase], ord=2)
-        self.dhf_fit_error = fitting_error_DHF
+        fitting_window_weeks = 12
+        sample_stride = 10000
+        df_trim_indices = [0, 1, 6, 9]
+        dhf_trim_indices = [0, 1, 3, 4, 6, 7, 8]
+        weekly_df_counts = self.weekly_df_frequency_array[3:, 1]
+        weekly_dhf_counts = self.weekly_dhf_frequency_array[1:, 1]
+        _, sampled_df_counts = self._sample_weekly_solution_points(
+            time_grid, z, sample_stride, df_trim_indices
+        )
+        _, sampled_dhf_counts = self._sample_weekly_solution_points(
+            time_grid, Y_m1_h, sample_stride, dhf_trim_indices
+        )
+        df_fit_error = np.linalg.norm(
+            weekly_df_counts[:fitting_window_weeks] - sampled_df_counts[:fitting_window_weeks],
+            ord=np.inf,
+        )
+        self.df_fit_error = df_fit_error
+        dhf_fit_error = np.linalg.norm(
+            weekly_dhf_counts[:fitting_window_weeks] - sampled_dhf_counts[:fitting_window_weeks],
+            ord=np.inf,
+        )
+        self.dhf_fit_error = dhf_fit_error
 
     @staticmethod
-    def compute_ode_rhs(x, t, Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b,
-              mu_M, mu_H, alpha_c, alpha_h, sigma, p, theta, q):
+    def compute_ode_rhs(state_vector, _time, Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b,
+                        mu_M, mu_H, alpha_c, alpha_h, sigma, p, theta, q):
         """Right-hand side of the compartmental ODE system."""
-        M_s = x[0]
-        M_I1 = x[1]
-        M_I2 = x[2]
-        S = x[3]
-        I_1 = x[4]
-        I_2 = x[5]
-        S_m1 = x[6]
-        Y_m1_c = x[7]
-        Y_m1_h = x[8]
-        z = x[9]
-        R = x[10]
+        M_s = state_vector[0]
+        M_I1 = state_vector[1]
+        M_I2 = state_vector[2]
+        S = state_vector[3]
+        I_1 = state_vector[4]
+        I_2 = state_vector[5]
+        S_m1 = state_vector[6]
+        Y_m1_c = state_vector[7]
+        Y_m1_h = state_vector[8]
+        z = state_vector[9]
+        R = state_vector[10]
         #
         #
         N_H = S + I_1 + I_2 + S_m1 + Y_m1_c + Y_m1_h + R
@@ -425,18 +405,18 @@ class StochasticSearch(data_processing.DataProcessing):
         #
         dz = p * (dI_1 + dI_2 + dY_m1_c)
         dR = alpha_c * (I_1 + I_2 + Y_m1_c) + alpha_h * Y_m1_h - mu_H * R
-        dydt = np.array([dM_s, dM_I1, dM_I2,
-                         dS, dI_1, dI_2,
-                         dS_m1, dY_m1_c, dY_m1_h, dz, dR])
-        dydt = dydt.astype('float64')
-        return dydt
+        derivatives = np.array([dM_s, dM_I1, dM_I2,
+                                dS, dI_1, dI_2,
+                                dS_m1, dY_m1_c, dY_m1_h, dz, dR])
+        derivatives = derivatives.astype('float64')
+        return derivatives
 #
     def solve_ode_system(self):
         """Integrate the model ODE system over the configured time grid."""
-        T = self.T
-        t0 = self.t0
-        t = np.linspace(t0, T, self.grid_size)
-        y_0 = np.array(
+        final_time = self.T
+        initial_time = self.t0
+        time_grid = np.linspace(initial_time, final_time, self.grid_size)
+        initial_state = np.array(
             [self.M_s0, self.M_10, self.M_20,
              self.S_0, self.I_10, self.I_20,
              self.S_m1_0, self.Y_m1_c0, self.Y_m1_h0,
@@ -457,16 +437,14 @@ class StochasticSearch(data_processing.DataProcessing):
         sigma = self.sigma
         p = self.p
         theta = self.theta
-        #
-        #
-        #
-        y = integrate.odeint(self.compute_ode_rhs, y_0, t,
-                             args=(Lambda_M, Lambda_S, Lambda_S_m1,
-                                   beta_M, beta_H, b, mu_M, mu_H, alpha_c,
-                                   alpha_h, sigma, p, theta, q))
-        self.solution = y
-        self.t = t
-        return y
+
+        solution = integrate.odeint(self.compute_ode_rhs, initial_state, time_grid,
+                                    args=(Lambda_M, Lambda_S, Lambda_S_m1,
+                                          beta_M, beta_H, b, mu_M, mu_H, alpha_c,
+                                          alpha_h, sigma, p, theta, q))
+        self.solution = solution
+        self.t = time_grid
+        return solution
 
     def sample_model_parameters(self, flag_deterministic=False):
         """Sample a new parameter set and update the model state in place.
@@ -531,17 +509,19 @@ class StochasticSearch(data_processing.DataProcessing):
             # p = .05
             theta = 0.01 + 0.5 * np.random.rand()
             #
-            # Initial condition mosquitoes
-            p1 = 0.8 + .1 * np.random.rand()
-            pj = np.random.rand(2)
-            pj_hat = 0.8 * (1.0 - p1) / pj.sum() * pj
-            #
-            #
-            # M_s0 = p1 * (Lambda_M / mu_M)
+            # Retain these legacy draws so the stochastic sampling stream stays
+            # unchanged, even though the current mosquito initial conditions are fixed.
+            _legacy_primary_mosquito_share = 0.8 + .1 * np.random.rand()
+            _legacy_infected_mosquito_draws = np.random.rand(2)
+            _legacy_infected_mosquito_weights = (
+                0.8
+                * (1.0 - _legacy_primary_mosquito_share)
+                / _legacy_infected_mosquito_draws.sum()
+                * _legacy_infected_mosquito_draws
+            )
+
             M_s0 = 120000
-            # M_10 = pj_hat[0] * (Lambda_M / mu_M)
             M_10 = 10
-            # M_20 = pj_hat[1] * (Lambda_M / mu_M)
             M_20 = 10
             #
             # Initial condition humans
@@ -608,12 +588,12 @@ class StochasticSearch(data_processing.DataProcessing):
         self.h = h
         self.T = T
         #
-        new_parameters = [Lambda_M, beta_M,
-                          beta_H, b, mu_M, alpha_c, alpha_h,
-                          sigma, p, theta, M_s0, M_10, M_20, S_0, I_10, I_20,
-                          S_m1_0, Y_m1_c0, Y_m1_h0, Rec_0, z0, h, T]
-        new_parameters = np.array(new_parameters)
-        return new_parameters
+        parameter_vector = np.array([
+            Lambda_M, beta_M, beta_H, b, mu_M, alpha_c, alpha_h,
+            sigma, p, theta, M_s0, M_10, M_20, S_0, I_10, I_20,
+            S_m1_0, Y_m1_c0, Y_m1_h0, Rec_0, z0, h, T,
+        ])
+        return parameter_vector
 
     def save_parameter_snapshot(self, file_name_prefix=None):
         """Persist the current parameter state as a YAML snapshot."""

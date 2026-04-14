@@ -37,9 +37,6 @@ class DataProcessing:
         self.weekly_dhf_frequency_array = np.empty((0, 2), dtype=int)
         self.base_dir = Path(__file__).resolve().parent
         self.data_dir = resolve_data_directory(data_dir, create=data_dir is not None)
-        # The original script expected to run a setup script under ./raw_data, but
-        # that file is not present in this repository. Guard the call to avoid
-        # crashes while keeping the rest of the pipeline functional.
         setup_script = self.data_dir / "setup.sh"
         if setup_script.exists():
             subprocess.run(["sh", str(setup_script)], check=False)
@@ -285,7 +282,7 @@ class DataProcessing:
         if not df_path.exists() or not dhf_path.exists():
             self.export_incidence_rows()
 
-        columns = ["date", "label"]
+        columns = ["date", "Fever"]
         df_df = pd.read_csv(
             df_path,
             header=None,
@@ -300,33 +297,39 @@ class DataProcessing:
             parse_dates=["date"],
             dayfirst=False,
         )
+        df_df.set_index("date", inplace=True)
+        df_dhf.set_index("date", inplace=True)
         return df_df, df_dhf
 
     @staticmethod
     def count_cases_by_date(frame: pd.DataFrame) -> pd.DataFrame:
         """Aggregate case rows into one count per calendar date."""
+        counts = frame.copy()
+        counts["date"] = counts.index.normalize()
+        counts["date"] = pd.to_datetime(counts["date"])
+        counts.reset_index(drop=True, inplace=True)
         counts = (
-            frame.groupby(frame["date"].dt.normalize())
+            counts.groupby(counts["date"].dt.normalize())
             .size()
             .reset_index(name="count")
             .sort_values("date")
             .reset_index(drop=True)
         )
-        counts["date"] = pd.to_datetime(counts["date"])
         counts["count"] = counts["count"].astype(int)
+        counts.set_index("date", inplace=True)
         return counts
 
     @staticmethod
     def aggregate_daily_counts_by_week(frame: pd.DataFrame) -> pd.DataFrame:
         """Aggregate a date-frequency table into one count per ISO week."""
         weekly = (
-            frame.assign(week=frame["date"].dt.isocalendar().week.astype(int))
+            frame.reset_index(drop=False)
+            .assign(week=lambda df: df["date"].dt.isocalendar().week.astype(int))
             .groupby("week", as_index=False)["count"]
             .sum()
             .sort_values("week")
             .reset_index(drop=True)
         )
-        weekly["week"] = weekly["week"].astype(int)
         weekly["count"] = weekly["count"].astype(int)
         return weekly
 
@@ -335,6 +338,8 @@ class DataProcessing:
         df_df, df_dhf = self.load_incidence_dataframes()
         freq_df = self.count_cases_by_date(df_df)
         freq_dhf = self.count_cases_by_date(df_dhf)
+        freq_df["count"] = freq_df["count"].astype(int)
+        freq_dhf["count"] = freq_dhf["count"].astype(int)
         self.daily_df_frequency_table = freq_df
         self.daily_dhf_frequency_table = freq_dhf
 

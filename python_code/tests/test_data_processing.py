@@ -1,4 +1,10 @@
+try:
+    import _bootstrap  # noqa: F401 - ensures src/ is on sys.path for unittest runs
+except ImportError:
+    from . import _bootstrap  # noqa: F401 - package-relative fallback
+
 import sqlite3
+import matplotlib.pyplot as plt
 from pathlib import Path
 
 import pandas as pd
@@ -35,13 +41,16 @@ def _build_expected_daily_counts(data_dir, fever):
         .reset_index(drop=True)
         .astype({"count": int})
     )
+    expected.set_index("date", inplace=True)
     return expected
 
 
 def _build_expected_weekly_counts(data_dir, fever):
     daily_counts = _build_expected_daily_counts(data_dir, fever)
     expected = (
-        daily_counts.assign(week=daily_counts["date"].dt.isocalendar().week.astype(int))
+        daily_counts.assign(
+            week=daily_counts.index.to_series().dt.isocalendar().week.astype(int)
+        )
         .groupby("week", as_index=False)["count"]
         .sum()
         .sort_values("week")

@@ -6,7 +6,9 @@ import datetime
 import yaml
 from scipy import integrate
 import matplotlib.pyplot as plt
+import operator
 from pathlib import Path
+
 
 # Local import used lazily inside __init__ if raw_data files are missing.
 try:
@@ -290,11 +292,17 @@ class StochasticSearch(data_processing.DataProcessing):
             weekly_counts['week'] = pd.to_datetime(weekly_counts['week'])
         weekly_df_counts.to_csv(self.build_data_file_path('frequency_per_week_DF.csv'),
                                 index=False)
-        weekly_dhf_counts.to_csv(self.build_data_file_path('frequency_per_week_DHF.csv'),
-                                 index=False)
+        weekly_dhf_counts.to_csv(
+            self.build_data_file_path('frequency_per_week_DHF.csv'),
+            index=False
+        )
 
-        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 6),
-                                 sharex=True)
+        fig, axes = plt.subplots(
+            nrows=2,
+            ncols=1,
+            figsize=(10, 6),
+            sharex=True
+        )
 
         axes[0].plot(
             weekly_df_counts['week'],
@@ -355,61 +363,72 @@ class StochasticSearch(data_processing.DataProcessing):
         self.dhf_fit_error = dhf_fit_error
 
     @staticmethod
-    def compute_ode_rhs(state_vector, _time, Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b,
-                        mu_M, mu_H, alpha_c, alpha_h, sigma, p, theta, q):
-        """Right-hand side of the compartmental ODE system."""
-        M_s = state_vector[0]
-        M_I1 = state_vector[1]
-        M_I2 = state_vector[2]
-        S = state_vector[3]
-        I_1 = state_vector[4]
-        I_2 = state_vector[5]
-        S_m1 = state_vector[6]
-        Y_m1_c = state_vector[7]
-        Y_m1_h = state_vector[8]
-        z = state_vector[9]
-        R = state_vector[10]
-        #
-        #
-        N_H = S + I_1 + I_2 + S_m1 + Y_m1_c + Y_m1_h + R
-        # Births scale with current N_H to keep dN_H/dt ≈ 0.
-        Lambda_total = mu_H * N_H
-        Lambda_S = q * Lambda_total
-        Lambda_S_m1 = (1.0 - q) * Lambda_total
-        c_M = (beta_M * b / N_H)
-        c_H = (beta_H * b / N_H)
-        A_I1 = c_M * I_1
-        A_I2 = c_M * I_2
-        A_Y_m1_c = c_M * Y_m1_c
-        A_Y_m1_h = c_M * Y_m1_h
-        B_M1 = c_H * M_I1
-        B_M2 = c_H * M_I2
-        #
-        # rhs of the ODE
-        #
-        dM_s = Lambda_M - (A_I1 + A_I2 + A_Y_m1_c + A_Y_m1_h) * M_s \
-               - mu_M * M_s
+    def compute_ode_rhs(
+            state_vector,
+            _time,
+            q=None,
+            **params,
+    ):
+        """Evaluate the ODE right-hand side from equations (3.1) to (3.3).
+
+        The extra ``z`` state kept by the solver is interpreted as reported
+        classical-incidence. That incidence term is inferred from the
+        cumulative-incidence equations introduced immediately after (3.3), so
+        the public solver interface remains unchanged.
+        """
+        del q  # Retained only for backward compatibility with older call sites.
+
+        (
+            M_s, M_I1, M_I2,
+            S, I_1, I_2, R_s,
+            S_m1, Y_m1_c, Y_m1_h, R_s_m1
+        ) = state_vector
+
+        (
+            Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b, mu_M, mu_H,
+            alpha_c, alpha_h, sigma, p, theta, n_vector, n_host, n_host_m1
+        ) = operator.itemgetter(
+            "Lambda_M", "Lambda_S", "Lambda_S_m1", "beta_M", "beta_H", "b", "mu_M", "mu_H",
+            "alpha_c", "alpha_h", "sigma", "p", "theta", "n_vector", "n_host", "n_host_m1"
+        )(params)
+
+        primary_host_population = Lambda_S / mu_H
+        secondary_host_population = Lambda_S_m1 / mu_H
+        N_H = primary_host_population + secondary_host_population
+
+        vector_to_host_force = beta_H * b / N_H
+        host_to_vector_force = beta_M * b / N_H
+        A_I1 = host_to_vector_force * I_1
+        A_I2 = host_to_vector_force * I_2
+        A_Y_m1_c = host_to_vector_force * Y_m1_c
+        A_Y_m1_h = host_to_vector_force * Y_m1_h
+        A_total = A_I1 + A_I2 + A_Y_m1_c + A_Y_m1_h
+        B_M1 = vector_to_host_force * M_I1
+        B_M2 = vector_to_host_force * M_I2
+        reinfection_incidence = sigma * B_M2 * S_m1
+
+        dM_s = Lambda_M - A_total * M_s - mu_M * M_s
         dM_I1 = A_I1 * M_s - mu_M * M_I1
         dM_I2 = (A_I2 + A_Y_m1_c + A_Y_m1_h) * M_s - mu_M * M_I2
-        #
+
         dS = Lambda_S - (B_M1 + B_M2) * S - mu_H * S
         dI_1 = B_M1 * S - (alpha_c + mu_H) * I_1
         dI_2 = B_M2 * S - (alpha_c + mu_H) * I_2
-        #
-        dS_m1 = Lambda_S_m1 - sigma * B_M2 * S_m1 - mu_H * S_m1
-        #
-        dY_m1_c = (1.0 - theta) * sigma * B_M2 * S_m1 \
-                  - (alpha_c + mu_H) * Y_m1_c
+        dR_s = alpha_c * (I_1 + I_2) - mu_H * R_s
 
-        dY_m1_h = theta * sigma * B_M2 * S_m1 - (alpha_h + mu_H) * Y_m1_h
-        #
-        dz = p * (dI_1 + dI_2 + dY_m1_c)
-        dR = alpha_c * (I_1 + I_2 + Y_m1_c) + alpha_h * Y_m1_h - mu_H * R
-        derivatives = np.array([dM_s, dM_I1, dM_I2,
-                                dS, dI_1, dI_2,
-                                dS_m1, dY_m1_c, dY_m1_h, dz, dR])
-        derivatives = derivatives.astype('float64')
-        return derivatives
+        dS_m1 = Lambda_S_m1 - reinfection_incidence - mu_H * S_m1
+        dY_m1_c = (1.0 - theta) * reinfection_incidence - (alpha_c + mu_H) * Y_m1_c
+        dY_m1_h = theta * reinfection_incidence - (alpha_h + mu_H) * Y_m1_h
+        dR_s_m1 = alpha_c * Y_m1_c + alpha_h * Y_m1_h - mu_H * R_s_m1
+
+        return np.array(
+            [
+                    dM_s, dM_I1, dM_I2,
+                    dS, dI_1, dI_2, dR_s,
+                    dS_m1, dY_m1_c, dY_m1_h, dR_s_m1
+            ],
+            dtype=np.float64,
+        )
 #
     def solve_ode_system(self):
         """Integrate the model ODE system over the configured time grid."""
@@ -421,12 +440,9 @@ class StochasticSearch(data_processing.DataProcessing):
              self.S_0, self.I_10, self.I_20,
              self.S_m1_0, self.Y_m1_c0, self.Y_m1_h0,
              self.z0, self.Rec_0])
-        # Births depend on current N_H to keep N_H near-constant:
-        # split between seronegative (q) and seropositive (1-q)
-        q = 0.9
         Lambda_M = self.Lambda_M
-        Lambda_S_m1 = None  # computed on the fly in f_rhs
-        Lambda_S = None     # computed on the fly in f_rhs
+        Lambda_S = self.Lambda_S
+        Lambda_S_m1 = self.Lambda_S_m1
         beta_M = self.beta_M
         beta_H = self.beta_H
         b = self.b
@@ -441,7 +457,7 @@ class StochasticSearch(data_processing.DataProcessing):
         solution = integrate.odeint(self.compute_ode_rhs, initial_state, time_grid,
                                     args=(Lambda_M, Lambda_S, Lambda_S_m1,
                                           beta_M, beta_H, b, mu_M, mu_H, alpha_c,
-                                          alpha_h, sigma, p, theta, q))
+                                          alpha_h, sigma, p, theta))
         self.solution = solution
         self.t = time_grid
         return solution
@@ -482,7 +498,8 @@ class StochasticSearch(data_processing.DataProcessing):
             S_m1_0 = 4400.000000
             Y_m1_c0 = 0.0
             Y_m1_h0 = 0.0
-            Rec_0 = 0.0
+            R_s0 = 0.0
+            R_s_m1_0 = 0.0
             z0 = 1.050000
             #
             #
@@ -582,7 +599,8 @@ class StochasticSearch(data_processing.DataProcessing):
         #
         self.Y_m1_c0 = Y_m1_c0
         self.Y_m1_h0 = Y_m1_h0
-        self.Rec_0 = Rec_0
+        R_s0 = self.R_s0
+        R_s_m1_0 = self.R_s_m1_0
         self.z0 = z0
         #
         self.h = h
@@ -591,7 +609,8 @@ class StochasticSearch(data_processing.DataProcessing):
         parameter_vector = np.array([
             Lambda_M, beta_M, beta_H, b, mu_M, alpha_c, alpha_h,
             sigma, p, theta, M_s0, M_10, M_20, S_0, I_10, I_20,
-            S_m1_0, Y_m1_c0, Y_m1_h0, Rec_0, z0, h, T,
+            S_m1_0, Y_m1_c0, Y_m1_h0,
+            R_s0, R_s_m1_0, z0, h, T,
         ])
         return parameter_vector
 
@@ -621,7 +640,8 @@ class StochasticSearch(data_processing.DataProcessing):
         S_m1_0 = self.S_m1_0
         Y_m1_c0 = self.Y_m1_c0
         Y_m1_h0 = self.Y_m1_h0
-        Rec_0 = self.Rec_0
+        R_s0 = self.R_s0
+        R_s_m1_0 =  self.R_s_m1_0
         z0 = self.z0
         h = self.h
         T = self.T
@@ -629,14 +649,19 @@ class StochasticSearch(data_processing.DataProcessing):
         parameters = {
             'Lambda_M': Lambda_M, 'Lambda_S': Lambda_S,
             'Lambda_S_m1': Lambda_S_m1,
-            'beta_M': beta_M, 'beta_H': beta_H, 'b': b,
-            'mu_M': mu_M, 'mu_H': mu_H, 'alpha_c': alpha_c,
-            'alpha_h': alpha_h, 'sigma': sigma, 'p': p,
-            'theta': theta, 'M_s0': M_s0, 'M_10': M_10,
-            'M_20': M_20, 'S_0': S_0, 'I_10': I_10,
-            'I_20': I_20, 'S_m1_0': S_m1_0, 'Y_m1_c0': Y_m1_c0,
+            'beta_M': beta_M, 'beta_H': beta_H,
+            'b': b,
+            'mu_M': mu_M, 'mu_H': mu_H,
+            'alpha_c': alpha_c,
+            'alpha_h': alpha_h,
+            'sigma': sigma, 'p': p,
+            'theta': theta,
+            'M_s0': M_s0, 'M_10': M_10, 'M_20': M_20,
+            'S_0': S_0, 'I_10': I_10, 'I_20': I_20,
+            'S_m1_0': S_m1_0, 'Y_m1_c0': Y_m1_c0,
             'Y_m1_h0': Y_m1_h0,
-            'Rec_0': Rec_0, 'z0': z0, 'h': h,
+            'R_s0': R_s0, 'R_s_m1_0': R_s_m1_0,
+            'z0': z0, 'h': h,
             'T': T, 'r_zero': r_zero
             }
         #
@@ -814,6 +839,8 @@ class StochasticSearch(data_processing.DataProcessing):
         self.S_m1_0 = np.float64(parameter_data.get('S_m1_0'))
         self.Y_m1c_0 = np.float64(parameter_data.get('Y_m1c_0'))
         self.Y_m1h_0 = np.float64(parameter_data.get('Y_m1h_0'))
+        self.R_s0 = np.float64(parameter_data.get('R_s0'))
+        self.R_s_m1_0 = np.float64(parameter_data.get('R_s_m1_0'))
         self.Rec_0 = np.float64(parameter_data.get('Rec_0'))
         self.z0 = np.float64(parameter_data.get('z0'))
         self.h = np.float64(parameter_data.get('h'))

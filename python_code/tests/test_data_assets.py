@@ -1,3 +1,8 @@
+try:
+    import _bootstrap  # noqa: F401 - ensures src/ is on sys.path for unittest runs
+except ImportError:
+    from . import _bootstrap  # noqa: F401 - package-relative fallback
+
 from StochasticSearchPy import data_assets
 
 
@@ -8,6 +13,15 @@ def test_resolve_data_directory_prefers_environment_variable(tmp_path, monkeypat
 
     assert data_assets.resolve_data_directory() == env_data_dir
 
+def test_resolve_real_data_directory(real_data, monkeypatch):
+    env_data_dir = real_data / "env-data"
+    env_data_dir.mkdir()
+    monkeypatch.setenv(data_assets.DATA_DIR_ENV_VAR, str(env_data_dir))
+    ground_true_data_dir = data_assets.resolve_data_directory()
+    print('\n The raw data directory from hand: ' + str(env_data_dir))
+    print('\n The raw data directory from hand:' + str(ground_true_data_dir))
+
+    assert data_assets.resolve_data_directory() == env_data_dir
 
 def test_copy_reference_dataset_copies_reference_files(tmp_path, monkeypatch):
     source_dir = tmp_path / "reference"

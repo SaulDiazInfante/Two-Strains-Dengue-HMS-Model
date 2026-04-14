@@ -368,7 +368,7 @@ class StochasticSearch(data_processing.DataProcessing):
             _time,
             q=None,
             **params,
-    ):
+    ) -> np.ndarray:
         """Evaluate the ODE right-hand side from equations (3.1) to (3.3).
 
         The extra ``z`` state kept by the solver is interpreted as reported

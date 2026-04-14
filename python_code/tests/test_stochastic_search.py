@@ -90,10 +90,6 @@ def test_compute_ode_rhs():
         'n_host_m1': n_host_m1
     }
 
-    M_s, M_1, M_2 = state_vector
-    S, I_1, I_2, R_s = state_host
-    S_m1, Y_m1_c, Y_m1_h, R_s_m1 = state_host_m1
-
     state = np.concatenate((state_vector, state_host, state_host_m1), dtype=float)
     derivatives = StochasticSearch.compute_ode_rhs(state, 0.0, **params)
 

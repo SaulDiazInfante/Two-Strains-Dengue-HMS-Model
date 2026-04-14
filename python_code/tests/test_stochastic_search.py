@@ -5,9 +5,8 @@ except ImportError:
 
 import numpy as np
 import pytest
-from pathlib import Path
-
 from StochasticSearchPy import StochasticSearch
+from pathlib import Path
 
 
 def test_stochastic_search_uses_runtime_artifact_directory(tmp_path, sample_data_dir):

@@ -158,5 +158,4 @@ def copy_reference_dataset(output_dir, source_dir=None) -> tuple[Path, Path, lis
         copied = target_path / name
         shutil.copy2(source_path / name, copied)
         copied_paths.append(copied)
-
     return source_path, target_path, copied_paths

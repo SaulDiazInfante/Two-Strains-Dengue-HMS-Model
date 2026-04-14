@@ -1,5 +1,6 @@
 """Core stochastic search model and plotting utilities."""
 
+import json
 import numpy as np
 import pandas as pd
 import datetime
@@ -19,15 +20,113 @@ except ImportError:
 
 
 class StochasticSearch(data_processing.DataProcessing):
-    """Run the two-strain dengue search model against prepared input data.
+    """
+    This class implements a stochastic search algorithm for epidemiological modeling.
+    Its purpose is to process weekly frequency data, configure and manage model parameters,
+    evaluate search acceptance criteria, and generate fitting plots.
 
-    Parameters
-    ----------
-    data_dir:
-        Directory containing prepared input files.
-    runtime_dir:
-        Directory where plots, parameter snapshots, and other generated
-        artifacts should be written.
+    :ivar sample_count: Number of samples used in the stochastic search.
+    :type sample_count: int
+    :ivar base_dir: Base directory of the current script.
+    :type base_dir: pathlib.Path
+    :ivar runtime_dir: Directory for storing runtime artifacts.
+    :type runtime_dir: pathlib.Path
+    :ivar plots_dir: Directory for saving plot figures.
+    :type plots_dir: pathlib.Path
+    :ivar output_dir: Directory for saving parameter files.
+    :type output_dir: pathlib.Path
+    :ivar weekly_df_frequency_array: Processed frequency array for DF (Dengue Fever) data.
+    :type weekly_df_frequency_array: numpy.ndarray
+    :ivar weekly_dhf_frequency_array: Processed frequency array for DHF (Dengue Hemorrhagic Fever) data.
+    :type weekly_dhf_frequency_array: numpy.ndarray
+    :ivar df_error_threshold: Error threshold for DF fitting.
+    :type df_error_threshold: float
+    :ivar dhf_error_threshold: Error threshold for DHF fitting.
+    :type dhf_error_threshold: float
+    :ivar Lambda_M: Initial mosquito carrying capacity.
+    :type Lambda_M: float
+    :ivar beta_M: Mosquito-human biting rate factor.
+    :type beta_M: float
+    :ivar beta_H: Human-mosquito biting rate factor.
+    :type beta_H: float
+    :ivar b: Specific growth parameter for the mosquito population.
+    :type b: float
+    :ivar mu_M: Mosquito death rate.
+    :type mu_M: float
+    :ivar mu_H: Human death rate.
+    :type mu_H: float
+    :ivar alpha_c: Complex transmission rate.
+    :type alpha_c: float
+    :ivar alpha_h: Hemorrhagic transmission rate.
+    :type alpha_h: float
+    :ivar sigma: Mosquito-to-human infectious transmission parameter.
+    :type sigma: float
+    :ivar p: Fraction of surviving mosquitoes.
+    :type p: float
+    :ivar theta: Specificity parameter for the dynamics model.
+    :type theta: float
+    :ivar peak_df_cases: Peak case count for DF in simulation.
+    :type peak_df_cases: float
+    :ivar M_s0: Initial adult mosquito population size.
+    :type M_s0: float
+    :ivar M_10: Initial mosquito infection state 1.
+    :type M_10: float
+    :ivar M_20: Initial mosquito infection state 2.
+    :type M_20: float
+    :ivar I_10: Initial human infective state 1 population.
+    :type I_10: float
+    :ivar I_20: Initial human infective state 2 population.
+    :type I_20: float
+    :ivar S_0: Initial susceptible human population.
+    :type S_0: float
+    :ivar S_m1_0: Initial pre-symptomatic mosquito population.
+    :type S_m1_0: float
+    :ivar Y_m1_c0: Initial mosquito compartments for particular symptoms.
+    :type Y_m1_c0: float
+    :ivar Y_m1_h0: Initial hemorrhagic state mosquito compartments.
+    :type Y_m1_h0: float
+    :ivar Rec_0: Initial recovered human population.
+    :type Rec_0: float
+    :ivar z0: Initial average mosquito infectivity parameter.
+    :type z0: float
+    :ivar N_H: Total human population size.
+    :type N_H: float
+    :ivar N_sm1: Total susceptible and pre-symptomatic mosquito population size.
+    :type N_sm1: float
+    :ivar Lambda_S_m1: Initial birth rate for resting mosquitoes.
+    :type Lambda_S_m1: float
+    :ivar Lambda_S: Initial birth rate for surviving mosquitoes.
+    :type Lambda_S: float
+    :ivar t0: Start time of simulation.
+    :type t0: int
+    :ivar T: End time of simulation.
+    :type T: int
+    :ivar grid_size: Computation grid points for simulation.
+    :type grid_size: int
+    :ivar h: Time step for computation based on grid size.
+    :type h: numpy.float64
+    :ivar r_01: Auxiliary performance metric for the model.
+    :type r_01: float
+    :ivar r_02: Another auxiliary performance metric for the model.
+    :type r_02: float
+    :ivar r_zero: Basic reproduction number for initial condition.
+    :type r_zero: int
+    :ivar t: Time grid for simulation.
+    :type t: numpy.ndarray
+    :ivar solution: Solution array storing simulation results.
+    :type solution: numpy.ndarray
+    :ivar df_fit_error: Error metric for DF fitting.
+    :type df_fit_error: float
+    :ivar dhf_fit_error: Error metric for DHF fitting.
+    :type dhf_fit_error: float
+    :ivar meets_r_zero_threshold: Boolean indicator for R0 threshold evaluation.
+    :type meets_r_zero_threshold: bool
+    :ivar meets_df_error_threshold: Boolean indicator for DF error threshold.
+    :type meets_df_error_threshold: bool
+    :ivar meets_dhf_error_threshold: Boolean indicator for DHF error threshold.
+    :type meets_dhf_error_threshold: bool
+    :ivar meets_acceptance_criteria: Boolean flag for overall acceptance criteria.
+    :type meets_acceptance_criteria: bool
     """
 
     def __init__(self, data_dir=None, runtime_dir=None):
@@ -615,7 +714,7 @@ class StochasticSearch(data_processing.DataProcessing):
         return parameter_vector
 
     def save_parameter_snapshot(self, file_name_prefix=None):
-        """Persist the current parameter state as a YAML snapshot."""
+        """Persist the current parameter state as a JSON snapshot."""
 
         # load parameters
         Lambda_M = self.Lambda_M
@@ -641,38 +740,47 @@ class StochasticSearch(data_processing.DataProcessing):
         Y_m1_c0 = self.Y_m1_c0
         Y_m1_h0 = self.Y_m1_h0
         R_s0 = self.R_s0
-        R_s_m1_0 =  self.R_s_m1_0
+        R_s_m1_0 = self.R_s_m1_0
         z0 = self.z0
         h = self.h
         T = self.T
         r_zero = self.r_zero
         parameters = {
-            'Lambda_M': Lambda_M, 'Lambda_S': Lambda_S,
-            'Lambda_S_m1': Lambda_S_m1,
-            'beta_M': beta_M, 'beta_H': beta_H,
-            'b': b,
-            'mu_M': mu_M, 'mu_H': mu_H,
-            'alpha_c': alpha_c,
-            'alpha_h': alpha_h,
-            'sigma': sigma, 'p': p,
-            'theta': theta,
-            'M_s0': M_s0, 'M_10': M_10, 'M_20': M_20,
-            'S_0': S_0, 'I_10': I_10, 'I_20': I_20,
-            'S_m1_0': S_m1_0, 'Y_m1_c0': Y_m1_c0,
-            'Y_m1_h0': Y_m1_h0,
-            'R_s0': R_s0, 'R_s_m1_0': R_s_m1_0,
-            'z0': z0, 'h': h,
-            'T': T, 'r_zero': r_zero
-            }
-        #
-        #
-        #
-        #
+            'Lambda_M': float(Lambda_M),
+            'Lambda_S': float(Lambda_S),
+            'Lambda_S_m1': float(Lambda_S_m1),
+            'beta_M': float(beta_M),
+            'beta_H': float(beta_H),
+            'b': float(b),
+            'mu_M': float(mu_M),
+            'mu_H': float(mu_H),
+            'alpha_c': float(alpha_c),
+            'alpha_h': float(alpha_h),
+            'sigma': float(sigma),
+            'p': float(p),
+            'theta': float(theta),
+            'M_s0': float(M_s0),
+            'M_10': float(M_10),
+            'M_20': float(M_20),
+            'S_0': float(S_0),
+            'I_10': float(I_10),
+            'I_20': float(I_20),
+            'S_m1_0': float(S_m1_0),
+            'Y_m1_c0': float(Y_m1_c0),
+            'Y_m1_h0': float(Y_m1_h0),
+            'R_s0': float(R_s0),
+            'R_s_m1_0': float(R_s_m1_0),
+            'z0': float(z0),
+            'h': float(h),
+            'T': float(T),
+            'r_zero': float(r_zero)
+        }
+
         str_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         prefix = file_name_prefix or str(self.output_dir / 'parameters_')
-        file_name = prefix + str_time + '.yml'
+        file_name = prefix + str_time + '.json'
         with open(file_name, 'w') as outfile:
-            yaml.safe_dump(parameters, outfile, default_flow_style=False)
+            json.dump(parameters, outfile, indent=2)
 
     def compute_basic_reproduction_numbers(self):
         """Compute the basic reproduction number and its two components."""
@@ -845,3 +953,62 @@ class StochasticSearch(data_processing.DataProcessing):
         self.z0 = np.float64(parameter_data.get('z0'))
         self.h = np.float64(parameter_data.get('h'))
         self.T = np.float64(parameter_data.get('T'))
+
+    def load_parameters_from_json(self, file_path):
+        """Load model parameters from a JSON file and refresh derived fields."""
+        with open(file_path, 'r') as f:
+            params = json.load(f)
+
+        def get_float(key, default):
+            return np.float64(params.get(key, default))
+
+        def get_int(key, default):
+            return int(params.get(key, default))
+
+        # Core rates
+        self.Lambda_M = get_float('Lambda_M', self.Lambda_M)
+        self.beta_M = get_float('beta_M', self.beta_M)
+        self.beta_H = get_float('beta_H', self.beta_H)
+        self.b = get_float('b', self.b)
+        self.mu_M = get_float('mu_M', self.mu_M)
+        self.mu_H = get_float('mu_H', self.mu_H)
+        self.alpha_c = get_float('alpha_c', self.alpha_c)
+        self.alpha_h = get_float('alpha_h', self.alpha_h)
+        self.sigma = get_float('sigma', self.sigma)
+        self.p = get_float('p', self.p)
+        self.theta = get_float('theta', self.theta)
+        self.peak_df_cases = get_float('peak_df_cases', self.peak_df_cases)
+
+        # Vector initial conditions
+        self.M_s0 = get_float('M_s0', self.M_s0)
+        self.M_10 = get_float('M_10', self.M_10)
+        self.M_20 = get_float('M_20', self.M_20)
+
+        # Host initial conditions
+        self.I_10 = get_float('I_10', self.I_10)
+        self.I_20 = get_float('I_20', self.I_20)
+        self.S_0 = get_float('S_0', self.S_0)
+        self.S_m1_0 = get_float('S_m1_0', self.S_m1_0)
+        self.Y_m1_c0 = get_float('Y_m1_c0', self.Y_m1_c0)
+        self.Y_m1_h0 = get_float('Y_m1_h0', self.Y_m1_h0)
+        self.Rec_0 = get_float('Rec_0', self.Rec_0)
+        self.z0 = get_float('z0', self.z0)
+
+        # Timing / integration settings
+        self.t0 = get_float('t0', self.t0)
+        self.T = get_float('T', self.T)
+        self.grid_size = get_int('grid_size', int((self.T - self.t0) * 10000))
+        self.h = get_float('h', np.float64(self.T) / np.float64(self.grid_size))
+        self.r_01 = get_float('r_01', self.r_01)
+        self.r_02 = get_float('r_02', self.r_02)
+        self.r_zero = get_float('r_zero', self.r_zero)
+
+        # Derived populations and inflows (use provided value if present, else recompute)
+        self.N_H = get_float('N_H', self.S_0 + self.I_10 + self.I_20 + self.S_m1_0)
+        self.N_sm1 = get_float('N_sm1', self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0)
+        self.Lambda_S_m1 = get_float('Lambda_S_m1', 0.1 * self.mu_H * self.N_H)
+        self.Lambda_S = get_float('Lambda_S', 0.9 * self.mu_H * self.N_H)
+
+        # Refresh integration arrays to match updated grid
+        self.t = np.linspace(self.t0, self.T, self.grid_size)
+        self.solution = np.zeros([len(self.t), 13])

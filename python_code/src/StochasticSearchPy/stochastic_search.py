@@ -798,8 +798,8 @@ class StochasticSearch(data_processing.DataProcessing):
         S_0 = self.S_0
         S_m1_0 = self.S_m1_0
         #
-        # p = self.p
-        # theta = self.theta
+        p = self.p
+        theta = self.theta
         #
         N_H = self.N_H
         N_sm1 = self.N_sm1

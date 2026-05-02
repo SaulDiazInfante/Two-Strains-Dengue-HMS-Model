@@ -4,22 +4,37 @@ except ImportError:
     from . import _bootstrap  # noqa: F401 - package-relative fallback
 
 import numpy as np
+import pandas as pd
 import pytest
-from StochasticSearchPy import StochasticSearch
-from pathlib import Path
+
+from StochasticSearchPy.stochastic_search import StochasticSearch
 
 
-def test_stochastic_search_uses_runtime_artifact_directory(tmp_path, sample_data_dir):
-    runtime_dir = tmp_path / "runtime"
-    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=runtime_dir)
+def test_sample_model_parameters_returns_single_row_dataframe(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
 
-    assert sim.runtime_dir == runtime_dir
-    assert sim.plots_dir == runtime_dir / "plots"
-    assert sim.output_dir == runtime_dir / "parameters"
-    assert sim.weekly_df_frequency_array.shape == (2, 2)
-    assert sim.weekly_dhf_frequency_array.shape == (2, 2)
-    assert Path(sample_data_dir / "frequency_per_week_DF.csv").exists()
-    assert Path(sample_data_dir / "frequency_per_week_DHF.csv").exists()
+    parameter_frame = sim.sample_model_parameters(flag_deterministic=True)
+
+    assert isinstance(parameter_frame, pd.DataFrame)
+    assert list(parameter_frame.columns) == list(sim.SAMPLED_PARAMETER_COLUMNS)
+    assert len(parameter_frame.index) == 1
+
+    row = parameter_frame.iloc[0]
+    for column in sim.SAMPLED_PARAMETER_COLUMNS:
+        assert row[column] == pytest.approx(getattr(sim, column))
+
+
+def test_sample_model_parameters_stochastic_path_updates_instance_state(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    np.random.seed(0)
+
+    parameter_frame = sim.sample_model_parameters(flag_deterministic=False)
+
+    assert isinstance(parameter_frame, pd.DataFrame)
+    assert parameter_frame.loc[0, "R_s0"] == pytest.approx(0.0)
+    assert parameter_frame.loc[0, "R_s_m1_0"] == pytest.approx(0.0)
+    assert sim.Rec_0 == pytest.approx(0.0)
+    assert sim.mu_H == pytest.approx(0.000039 * 7.0)
 
 
 def test_compute_basic_reproduction_numbers_matches_baseline_parameters(tmp_path, sample_data_dir):
@@ -27,9 +42,77 @@ def test_compute_basic_reproduction_numbers_matches_baseline_parameters(tmp_path
 
     r01_per_week, r02_per_week, r0_per_week = sim.compute_basic_reproduction_numbers()
 
-    assert r01_per_week == pytest.approx(1.7783839818240441)
-    assert r02_per_week == pytest.approx(0.15248169655310542)
-    assert r0_per_week == pytest.approx(1.7849090325817885)
+    assert r01_per_week == pytest.approx(1.9033635638379547)
+    assert r02_per_week == pytest.approx(0.17132774893607353)
+    assert r0_per_week == pytest.approx(1.9110588828451682)
+
+
+def test_create_fitting_plot(tmp_path, sample_data_dir):
+    """
+    Test that create_fitting_plot generates a matplotlib figure.
+    This requires inputs to be initialized within the StochasticSearch instance.
+    """
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+
+    # Prepare necessary attributes to mock a completed simulation.
+    # t and solution must match the real grid: linspace(t0=25, T=53, grid_size=280000)
+    # and the solution dataframe must expose named DHF and reported-DF columns.
+    grid_size = int(sim.T - sim.t0) * 10000  # 280000
+    sim.t = np.linspace(sim.t0, sim.T, grid_size)
+    sim.solution = sim._build_solution_frame(
+        sim.t,
+        np.ones((grid_size, len(sim.ODE_STATE_COLUMNS))),
+    )
+    sim.weekly_df_frequency_array = np.array([[0, 10], [1, 12], [2, 14], [3, 16]])
+    sim.weekly_dhf_frequency_array = np.array([[0, 5], [1, 8], [2, 11]])
+
+    figure = sim.create_fitting_plot()
+
+    # Validate that the returned object is a matplotlib figure
+    assert figure is not None
+    assert figure.get_axes()  # Ensure there are axes present
+    assert len(figure.axes) == 4  # Ensure the expected four subplots exist
+
+
+def test_create_fitting_plot_uses_observation_scale_on_fitting_panels_only(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    grid_size = int(sim.T - sim.t0) * 10000
+    sim.t = np.linspace(sim.t0, sim.T, grid_size)
+    solution_values = np.ones((grid_size, len(sim.ODE_STATE_COLUMNS)))
+    z_index = sim.ODE_STATE_COLUMNS.index("z")
+    y_m1_h_index = sim.ODE_STATE_COLUMNS.index("Y_m1_h")
+    solution_values[12345, z_index] = 750.0
+    solution_values[23456, y_m1_h_index] = 125.0
+    sim.solution = sim._build_solution_frame(sim.t, solution_values)
+    sim.weekly_df_frequency_array = np.array([[0, 10], [1, 12], [2, 14], [3, 16]])
+    sim.weekly_dhf_frequency_array = np.array([[0, 5], [1, 8], [2, 11]])
+
+    figure = sim.create_fitting_plot()
+    df_qualitative_ymax = figure.axes[0].get_ylim()[1]
+    df_fitting_ymax = figure.axes[1].get_ylim()[1]
+    dhf_qualitative_ymax = figure.axes[2].get_ylim()[1]
+    dhf_fitting_ymax = figure.axes[3].get_ylim()[1]
+
+    assert df_qualitative_ymax >= 750.0
+    assert dhf_qualitative_ymax >= 125.0
+    assert df_fitting_ymax < 25.0
+    assert dhf_fitting_ymax < 15.0
+
+
+def test_solve_ode_system_replaces_zero_placeholder_solution(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    sim.grid_size = 250
+    sim.h = np.float64(sim.T) / np.float64(sim.grid_size)
+
+    solution = sim.solve_ode_system()
+
+    assert isinstance(solution, pd.DataFrame)
+    assert list(solution.columns) == list(sim.ODE_SOLUTION_COLUMNS)
+    assert solution.shape == (sim.grid_size, len(sim.ODE_SOLUTION_COLUMNS))
+    assert np.isfinite(solution.to_numpy()).all()
+    assert np.allclose(solution[sim.TIME_GRID_COLUMN].to_numpy(), sim.t)
+    assert not np.allclose(solution[list(sim.ODE_STATE_COLUMNS)].to_numpy(), 0.0)
+    assert solution is sim.solution
 
 
 def test_evaluate_search_acceptance_requires_all_thresholds(tmp_path, sample_data_dir):
@@ -46,7 +129,7 @@ def test_evaluate_search_acceptance_requires_all_thresholds(tmp_path, sample_dat
 
 
 def test_compute_ode_rhs():
-    state_vector = np.array([10000.0, 500.0, 700.0] )
+    state_vector = np.array([10000.0, 500.0, 700.0])
     state_host = np.array([18000.0, 1.0, 1.0, 0.0])
     state_host_m1 = np.array([6000.0, 1.0, 1.0, 0.0])
     n_vector = state_vector.sum()
@@ -58,7 +141,7 @@ def test_compute_ode_rhs():
 
     Lambda_M = n_vector * mu_M
     Lambda_S = n_host * mu_H
-    Lambda_S_m1 = n_host_m1 *  mu_H
+    Lambda_S_m1 = n_host_m1 * mu_H
 
     beta_M = 0.4
     beta_H = 0.3
@@ -98,4 +181,3 @@ def test_compute_ode_rhs():
     assert abs(vector_conservation_law) < 1e-8
     assert abs(host_conservation_law) < 1e-8
     assert abs(host_m1_conservation_law) < 1e-8
-

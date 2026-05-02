@@ -7,7 +7,7 @@ sim.__init__()
 sim.number_of_samples = 30
 sim.bound_error_FD = 0.4
 sim.bound_error_FHD = 0.4
-print '%-8s%-12s%-12s%-12s%-12s%-12s' \
+print ('%-8s%-12s%-12s%-12s%-12s%-12s')\
       % ('i', 'R_01', 'R_02', 'R_zero', 'error_DF', 'error_DHF')
 for i in np.arange(sim.number_of_samples):
     sim.ode_int_solution()

@@ -15,10 +15,12 @@ Example
 from .data_assets import DATA_DIR_ENV_VAR, copy_reference_dataset
 from .data_processing import DataProcessing
 from .stochastic_search import StochasticSearch
+from .cli import run_cli
 
 __all__ = [
     "DATA_DIR_ENV_VAR",
     "DataProcessing",
     "StochasticSearch",
     "copy_reference_dataset",
+    "run_cli",
 ]

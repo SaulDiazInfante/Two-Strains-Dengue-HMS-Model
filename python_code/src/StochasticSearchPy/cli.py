@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import shutil
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -20,7 +21,29 @@ except ImportError:
 
 def build_timestamp_string() -> str:
     """Return a filesystem-safe timestamp used in generated artifact names."""
-    return datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    return datetime.datetime.now().strftime("%Y%m%dT%H%M%S%f")
+
+
+def update_fitting_progress_figure(sim, fit_file: Path, previous_figure=None):
+    """Save and refresh the current DF/DHF fitting figure for an in-progress search."""
+    figure = sim.create_fitting_plot(figure=previous_figure)
+    figure.savefig(sim.plots_dir / "fitting_DF_DHF.png")
+    figure.savefig(fit_file)
+
+    manager = getattr(figure.canvas, "manager", None)
+    if manager is not None and hasattr(manager, "set_window_title"):
+        manager.set_window_title(fit_file.name)
+
+    if previous_figure is None:
+        plt.show(block=False)
+
+    canvas = getattr(figure, "canvas", None)
+    if canvas is not None and hasattr(canvas, "draw_idle"):
+        canvas.draw_idle()
+    if canvas is not None and hasattr(canvas, "flush_events"):
+        canvas.flush_events()
+    plt.pause(0.001)
+    return figure
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -65,7 +88,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     search.add_argument("--data-dir", type=Path, default=None)
     search.add_argument("--runtime-dir", type=Path, default=None)
     search.add_argument("--samples", type=int, default=1)
-    search.add_argument("--bound-error-fd", type=float, default=100.0)
+    search.add_argument("--bound-error-fd", type=float, default=300.0)
     search.add_argument("--bound-error-fhd", type=float, default=25.0)
     search.set_defaults(func=run_search_command)
 
@@ -114,6 +137,25 @@ def run_prepare_data_command(args) -> int:
     print(f"copied_files={len(copied_files)}")
     return 0
 
+def render_search_progress(sample_number: int, sample_count: int, width: int = 40) -> None:
+    """Render the in-place stochastic search progress bar."""
+    if sample_count <= 0:
+        return
+
+    completed = min(sample_number, sample_count)
+    fraction_completed = completed / sample_count
+    filled_width = int(width * fraction_completed)
+    bar = "#" * filled_width + "-" * (width - filled_width)
+    sys.stdout.write(
+        "\rsearch progress: |{}| {:6.2f}% ({}/{})".format(
+            bar,
+            100.0 * fraction_completed,
+            completed,
+            sample_count,
+        )
+    )
+    sys.stdout.flush()
+
 
 def run_search_command(args) -> int:
     """Execute the stochastic search workflow and persist generated artifacts."""
@@ -122,12 +164,9 @@ def run_search_command(args) -> int:
     sim.df_error_threshold = args.bound_error_fd
     sim.dhf_error_threshold = args.bound_error_fhd
     sim.build_weekly_frequency_tables()
-
-    print(
-        "%-8s%-12s%-12s%-12s%-12s%-12s%-12s"
-        % ("i", "R_01", "R_02", "R_zero", "error_DF", "error_DHF", "peak_DF")
-    )
-
+    search_timestamp = build_timestamp_string()
+    fit_file = sim.plots_dir / f"fitting_DF_DHF_{search_timestamp}.png"
+    live_fitting_figure = None
     samples = {
         "i": [],
         "r01": [],
@@ -141,11 +180,21 @@ def run_search_command(args) -> int:
 
     accepted_index = None
     accepted_log = sim.runtime_dir / "accepted_samples.txt"
+    accepted_header = (
+        "i       R_01        R_02        R_zero      error_DF    error_DHF   peak_DF     \n"
+        "================================================================================"
+    )
 
     for i in np.arange(sim.sample_count):
+        render_search_progress(int(i), sim.sample_count)
         sim.sample_model_parameters(flag_deterministic=False)
         sim.solve_ode_system()
         sim.compute_fitting_errors()
+        live_fitting_figure = update_fitting_progress_figure(
+            sim,
+            fit_file=fit_file,
+            previous_figure=live_fitting_figure,
+        )
         error_df = sim.df_fit_error
         error_dhf = sim.dhf_fit_error
         r01_per_week, r02_per_week, r0_per_week = sim.compute_basic_reproduction_numbers()
@@ -159,34 +208,35 @@ def run_search_command(args) -> int:
         samples["err_dhf"].append(error_dhf)
         samples["peak_df_cases"].append(sim.peak_df_cases)
         samples["accepted"].append(stop)
-
-        print(
-            "%-12d%-12f%-12f%-12f%-12f%-12f%-12f"
-            % (
-                i,
-                r01_per_week,
-                r02_per_week,
-                r0_per_week,
-                error_df,
-                error_dhf,
-                sim.peak_df_cases,
-            )
-        )
+        render_search_progress(int(i) + 1, sim.sample_count)
 
         if stop and accepted_index is None:
             accepted_index = i
             sim.save_solution_plots()
-            sim.save_fitting_plot()
             sim.save_parameter_snapshot()
             timestamp = build_timestamp_string()
-            fit_file = sim.plots_dir / f"fitting_DF_DHF_{timestamp}.png"
             pop_file = sim.plots_dir / f"populations_grid_{timestamp}.png"
-            shutil.copy2(sim.plots_dir / "fitting_DF_DHF.png", fit_file)
             shutil.copy2(sim.plots_dir / "populations_grid.png", pop_file)
             with accepted_log.open("a", encoding="utf-8") as logf:
                 logf.write(f"{fit_file.name}\n")
+            sys.stdout.write("\n")
+            print(accepted_header)
+            print(
+                "%-8d%-12f%-12f%-12f%-12f%-12f%-12f"
+                % (
+                    i,
+                    r01_per_week,
+                    r02_per_week,
+                    r0_per_week,
+                    error_df,
+                    error_dhf,
+                    sim.peak_df_cases,
+                )
+            )
             print(f"accepted_sample={i}")
             break
+    else:
+        sys.stdout.write("\n")
 
     plt.figure(figsize=(7, 5))
     plt.scatter(samples["err_df"], samples["r0"], s=10, alpha=0.4, label="Samples")

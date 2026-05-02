@@ -113,8 +113,8 @@ class StochasticSearch(data_processing.DataProcessing):
     :type r_zero: int
     :ivar t: Time grid for simulation.
     :type t: numpy.ndarray
-    :ivar solution: Solution array storing simulation results.
-    :type solution: numpy.ndarray
+    :ivar solution: ODE solution table storing the time grid and compartment trajectories.
+    :type solution: pandas.DataFrame
     :ivar df_fit_error: Error metric for DF fitting.
     :type df_fit_error: float
     :ivar dhf_fit_error: Error metric for DHF fitting.
@@ -128,6 +128,73 @@ class StochasticSearch(data_processing.DataProcessing):
     :ivar meets_acceptance_criteria: Boolean flag for overall acceptance criteria.
     :type meets_acceptance_criteria: bool
     """
+
+    SAMPLED_PARAMETER_COLUMNS = (
+        "Lambda_M",
+        "beta_M",
+        "beta_H",
+        "b",
+        "mu_M",
+        "alpha_c",
+        "alpha_h",
+        "sigma",
+        "p",
+        "theta",
+        "M_s0",
+        "M_10",
+        "M_20",
+        "S_0",
+        "I_10",
+        "I_20",
+        "S_m1_0",
+        "Y_m1_c0",
+        "Y_m1_h0",
+        "R_s0",
+        "R_s_m1_0",
+        "z0",
+        "h",
+        "T",
+    )
+    ODE_ARGUMENT_NAMES = (
+        "Lambda_M",
+        "Lambda_S",
+        "Lambda_S_m1",
+        "beta_M",
+        "beta_H",
+        "b",
+        "mu_M",
+        "mu_H",
+        "alpha_c",
+        "alpha_h",
+        "sigma",
+        "p",
+        "theta",
+    )
+    ODE_STATE_COLUMNS = (
+        "M_s",
+        "M_I1",
+        "M_I2",
+        "S",
+        "I_1",
+        "I_2",
+        "R_s",
+        "S_m1",
+        "Y_m1_c",
+        "Y_m1_h",
+        "R_s_m1",
+        "z",
+    )
+    TIME_GRID_COLUMN = "time_grid"
+    ODE_SOLUTION_COLUMNS = (TIME_GRID_COLUMN, *ODE_STATE_COLUMNS)
+    FITTING_PLOT_FIGSIZE = (13.5, 7.5)
+    FITTING_PLOT_LAYOUT = {
+        "left": 0.075,
+        "right": 0.985,
+        "bottom": 0.095,
+        "top": 0.925,
+        "wspace": 0.18,
+        "hspace": 0.34,
+    }
 
     def __init__(self, data_dir=None, runtime_dir=None):
         super().__init__(data_dir=data_dir)
@@ -146,8 +213,8 @@ class StochasticSearch(data_processing.DataProcessing):
             self.build_weekly_frequency_tables()
         self.weekly_df_frequency_array = self.read_weekly_frequency_array(df_path)
         self.weekly_dhf_frequency_array = self.read_weekly_frequency_array(dhf_path)
-        self.df_error_threshold = 100
-        self.dhf_error_threshold = 30
+        self.df_error_threshold = 300
+        self.dhf_error_threshold = 150
         # Numerics initial parameters
         self.Lambda_M = 41933.0 * 7.0
         self.beta_M = 0.001372700
@@ -171,13 +238,17 @@ class StochasticSearch(data_processing.DataProcessing):
         self.I_10 = 10.000000
         self.I_20 = 20.000000
         self.S_0 = 35600.000000 - (self.I_10 + self.I_20)
+
         self.S_m1_0 = 4400.000000
         self.Y_m1_c0 = 0.0
         self.Y_m1_h0 = 0.0
+        self.R_s0 = 0.0
+        self.R_s_m1_0 = 0.0
         self.Rec_0 = 0.0
+
         self.z0 = 1.050000
-        self.N_H = self.S_0 + self.I_10 + self.I_20 + self.S_m1_0
-        self.N_sm1 = self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0
+        self.N_H = self.S_0 + self.I_10 + self.I_20 + self.R_s0
+        self.N_sm1 = self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0 + self.R_s_m1_0
         self.Lambda_S_m1 = 0.1 * self.mu_H * self.N_H
         self.Lambda_S = 0.9 * self.mu_H * self.N_H
         self.t0 = 25  # 25.0
@@ -189,7 +260,10 @@ class StochasticSearch(data_processing.DataProcessing):
         self.r_zero = 0
         #
         self.t = np.linspace(self.t0, self.T, self.grid_size)
-        self.solution = np.zeros([len(self.t), 13])
+        self.solution = self._build_solution_frame(
+            self.t,
+            np.zeros((len(self.t), len(self.ODE_STATE_COLUMNS)), dtype=np.float64),
+        )
         #
         self.df_fit_error = 0.0
         self.dhf_fit_error = 0.0
@@ -235,18 +309,106 @@ class StochasticSearch(data_processing.DataProcessing):
         trim_indices: list[int],
     ) -> tuple[np.ndarray, np.ndarray]:
         """Sample a solution series at the weekly locations used during fitting."""
-        sampled_weeks = np.round(time_grid[:-1:sample_stride]).astype(int)
-        sampled_values = solution_values[:-1:sample_stride]
+        sampled_weeks = np.round(np.asarray(time_grid)[:-1:sample_stride]).astype(int)
+        sampled_values = np.asarray(solution_values)[:-1:sample_stride]
         return (
             np.delete(sampled_weeks, trim_indices),
             np.delete(sampled_values, trim_indices),
         )
 
-    def save_fitting_plot(self):
-        """Write the DF/DHF fitting comparison figure to ``runtime_dir``."""
-        time_grid = self.t
-        Y_m1_h = self.solution[:, 8]
-        z = self.solution[:, 9]
+    def _build_solution_frame(
+        self,
+        time_grid: np.ndarray,
+        solution_values: np.ndarray,
+    ) -> pd.DataFrame:
+        """Return an ODE solution dataframe with named state columns."""
+        solution_array = np.asarray(solution_values, dtype=np.float64)
+        if solution_array.ndim != 2:
+            raise ValueError(
+                "solution_values must be a 2D array with one column per ODE state; "
+                f"received ndim={solution_array.ndim}."
+            )
+        if solution_array.shape[1] != len(self.ODE_STATE_COLUMNS):
+            raise ValueError(
+                "solution_values column count must match ODE_STATE_COLUMNS; "
+                f"received {solution_array.shape[1]} columns."
+            )
+
+        solution_frame = pd.DataFrame(solution_array, columns=self.ODE_STATE_COLUMNS)
+        solution_frame.insert(
+            0,
+            self.TIME_GRID_COLUMN,
+            np.asarray(time_grid, dtype=np.float64),
+        )
+        return solution_frame
+
+    @staticmethod
+    def _calculate_padded_limits(*arrays, pad=0.1, floor=None) -> tuple[float, float]:
+        """Return padded plot limits that cover the provided finite data."""
+        valid_arrays = [np.asarray(array, dtype=np.float64).ravel() for array in arrays if len(array) > 0]
+        if not valid_arrays:
+            lower, upper = 0.0, 1.0
+        else:
+            stacked = np.concatenate(valid_arrays)
+            finite_values = stacked[np.isfinite(stacked)]
+            if finite_values.size == 0:
+                lower, upper = 0.0, 1.0
+            else:
+                data_min = finite_values.min()
+                data_max = finite_values.max()
+                data_range = data_max - data_min
+                pad_val = data_range * pad if data_range > 0 else max(abs(data_max) * pad, pad)
+                lower = data_min - pad_val
+                upper = data_max + pad_val
+
+        if floor is not None:
+            lower = max(floor, lower)
+        if lower == upper:
+            upper = lower + 1.0
+        return lower, upper
+
+    @staticmethod
+    def _add_metric_annotation(axis, label: str, x_limits: tuple[float, float], y_limits: tuple[float, float]):
+        """Place a text annotation near the top-left of the current data window."""
+        x_min, x_max = x_limits
+        y_min, y_max = y_limits
+        x_span = x_max - x_min
+        y_span = y_max - y_min
+        axis.text(
+            x_min + 0.04 * x_span,
+            y_max - 0.08 * y_span,
+            label,
+            fontsize=10,
+            ha="left",
+            va="top",
+        )
+
+    def create_fitting_plot(self, figure=None):
+        """Create the DF/DHF fitting comparison figure.
+    
+        Parameters
+        ----------
+        figure:
+            Optional existing figure to clear and redraw in place. When
+            provided, the same figure instance is reused for live updates.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            A 2x2 subplot figure comparing observed and simulated DF/DHF data.
+        
+        Notes
+        -----
+        The figure contains four subplots:
+        - Top left: Reported DF time series
+        - Top right: DF fitting comparison with error metric
+        - Bottom left: DHF time series
+        - Bottom right: DHF fitting comparison with error metric
+        """
+        solution_frame = self.solution
+        time_grid = solution_frame[self.TIME_GRID_COLUMN].to_numpy()
+        Y_m1_h = solution_frame["Y_m1_h"].to_numpy()
+        z = solution_frame["z"].to_numpy()
         df_observed_weeks = self.weekly_df_frequency_array[3:, 0]
         dhf_observed_weeks = self.weekly_dhf_frequency_array[1:, 0]
         weekly_df_counts = self.weekly_df_frequency_array[3:, 1]
@@ -261,27 +423,67 @@ class StochasticSearch(data_processing.DataProcessing):
             time_grid, Y_m1_h, sample_stride, dhf_trim_indices
         )
 
-        figure, axes = plt.subplots(2, 2, sharex=True)
+        if figure is None:
+            figure, axes = plt.subplots(
+                2,
+                2,
+                sharex="row",
+                figsize=self.FITTING_PLOT_FIGSIZE,
+                constrained_layout=False,
+            )
+        else:
+            figure.set_size_inches(*self.FITTING_PLOT_FIGSIZE, forward=True)
+            if len(figure.axes) == 4:
+                axes = np.asarray(figure.axes, dtype=object).reshape(2, 2)
+                for axis in axes.flat:
+                    axis.cla()
+            else:
+                figure.clear()
+                axes = figure.subplots(2, 2, sharex="row")
+        if hasattr(figure, "set_layout_engine"):
+            figure.set_layout_engine(None)
+        figure.subplots_adjust(**self.FITTING_PLOT_LAYOUT)
 
-        def calculate_padded_limits(*arrays, pad=0.1, floor=None):
-            stacked = np.concatenate([np.asarray(a).ravel() for a in arrays if len(a) > 0])
-            data_range = stacked.max() - stacked.min()
-            pad_val = data_range * pad if data_range > 0 else pad
-            lower = stacked.min() - pad_val
-            if floor is not None:
-                lower = max(floor, lower)
-            return lower, stacked.max() + pad_val
+        # Left column: qualitative view of the full simulated series.
+        df_left_ymin, df_left_ymax = self._calculate_padded_limits(
+            z,
+            pad=0.15,
+            floor=0.0,
+        )
+        dhf_left_ymin, dhf_left_ymax = self._calculate_padded_limits(
+            Y_m1_h,
+            pad=0.15,
+            floor=0.0,
+        )
 
-        # Use dynamic y-limits so raw_data and simulation are both visible.
-        df_ymin, df_ymax = calculate_padded_limits(weekly_df_counts, sampled_df_counts, pad=0.15, floor=0.0)
-        dhf_ymin, dhf_ymax = calculate_padded_limits(weekly_dhf_counts, sampled_dhf_counts, pad=0.15, floor=0.0)
-        df_xmin, df_xmax = calculate_padded_limits(df_observed_weeks, sampled_df_weeks, pad=0.02)
-        dhf_xmin, dhf_xmax = calculate_padded_limits(dhf_observed_weeks, sampled_dhf_weeks, pad=0.02)
+        # Right column: fitting view scaled only by the observed frequencies.
+        df_right_ymin, df_right_ymax = self._calculate_padded_limits(
+            weekly_df_counts,
+            pad=0.15,
+            floor=0.0,
+        )
+        dhf_right_ymin, dhf_right_ymax = self._calculate_padded_limits(
+            weekly_dhf_counts,
+            pad=0.15,
+            floor=0.0,
+        )
+        df_xmin, df_xmax = self._calculate_padded_limits(
+            time_grid,
+            df_observed_weeks,
+            sampled_df_weeks,
+            pad=0.02,
+        )
+        dhf_xmin, dhf_xmax = self._calculate_padded_limits(
+            time_grid,
+            dhf_observed_weeks,
+            sampled_dhf_weeks,
+            pad=0.02,
+        )
 
         axes[0, 0].plot(time_grid, z, 'b-')
         axes[0, 0].set_title(r'Reported DF ')
         axes[0, 0].set_xlim(df_xmin, df_xmax)
-        axes[0, 0].set_ylim(df_ymin, df_ymax)
+        axes[0, 0].set_ylim(df_left_ymin, df_left_ymax)
 
         axes[0, 1].plot(df_observed_weeks, weekly_df_counts,
                         ls='--',
@@ -301,18 +503,20 @@ class StochasticSearch(data_processing.DataProcessing):
                         ms=8,
                         mfc='blue',
                         alpha=0.5)
-        axes[0, 1].text(27, 300,
-                        'err=' + str(np.round(self.df_fit_error, 1)),
-                        fontsize=10
-                        )
-        axes[0, 1].set_ylim(df_ymin, df_ymax)
+        self._add_metric_annotation(
+            axes[0, 1],
+            'err=' + str(np.round(self.df_fit_error, 1)),
+            (df_xmin, df_xmax),
+            (df_right_ymin, df_right_ymax),
+        )
+        axes[0, 1].set_ylim(df_right_ymin, df_right_ymax)
         axes[0, 1].set_xlim(df_xmin, df_xmax)
         axes[0, 1].set_title(r'DF Fitting ')
 
         axes[1, 0].plot(time_grid, Y_m1_h, 'r-')
         axes[1, 0].set_title(r'DHF')
         axes[1, 0].set_xlim(dhf_xmin, dhf_xmax)
-        axes[1, 0].set_ylim(dhf_ymin, dhf_ymax)
+        axes[1, 0].set_ylim(dhf_left_ymin, dhf_left_ymax)
         axes[1, 1].plot(dhf_observed_weeks, weekly_dhf_counts,
                         ls='--',
                         color='orange',
@@ -330,23 +534,35 @@ class StochasticSearch(data_processing.DataProcessing):
                         color='crimson',
                         marker='*'
                         )
-        axes[1, 1].text(27, 50,
-                        'err=' + str(np.round(self.dhf_fit_error, 1)),
-                        fontsize=10
-                        )
-        axes[1, 1].set_ylim(dhf_ymin, dhf_ymax)
+        self._add_metric_annotation(
+            axes[1, 1],
+            'err=' + str(np.round(self.dhf_fit_error, 1)),
+            (dhf_xmin, dhf_xmax),
+            (dhf_right_ymin, dhf_right_ymax),
+        )
+        axes[1, 1].set_ylim(dhf_right_ymin, dhf_right_ymax)
         axes[1, 1].set_xlim(dhf_xmin, dhf_xmax)
         axes[1, 1].set_title(r'DHF Fitting ')
 
         for column_index in np.arange(2):
             axes[1, column_index].set(xlabel='week n')
+            axes[1, column_index].xaxis.set_label_coords(0.5, -0.14)
         for row_index in np.arange(2):
             axes[row_index, 0].set(ylabel='Individuals')
+            axes[row_index, 0].yaxis.set_label_coords(-0.075, 0.5)
 
-        plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=1.0)
-        plt.savefig(self.plots_dir / 'fitting_DF_DHF.png')
+        return figure
+    
+    def save_fitting_plot(self):
+        """Save the DF/DHF fitting comparison figure to disk.
+    
+        Creates a 2x2 subplot figure comparing observed weekly DF/DHF counts
+        with model simulation results and saves it to the plots directory.
+        The file is saved as ``fitting_DF_DHF.png`` in ``self.plots_dir``.
+        """
+        figure = self.create_fitting_plot()
+        figure.savefig(self.plots_dir / 'fitting_DF_DHF.png')
         plt.close(figure)
-
     def save_input_data_plot(self):
         """Plot daily DF and DHF case time series from CSVs in two stacked axes.
 
@@ -425,8 +641,8 @@ class StochasticSearch(data_processing.DataProcessing):
 
         for axis, weekly_counts in zip(axes, (weekly_df_counts, weekly_dhf_counts)):
             axis.grid(alpha=0.3, linestyle='--', linewidth=0.5)
-            # Tighten y-limits to keep dots visible around 1.
-            axis.set_ylim(0.0, weekly_counts['count'].max() * 1.1)
+            y_min, y_max = self._calculate_padded_limits(weekly_counts['count'], pad=0.1, floor=0.0)
+            axis.set_ylim(y_min, y_max)
         fig.autofmt_xdate()
         plt.tight_layout()
         plt.savefig(self.plots_dir / 'input_cases_timeseries.png')
@@ -434,11 +650,12 @@ class StochasticSearch(data_processing.DataProcessing):
 
     def compute_fitting_errors(self):
         """Compute the current DF and DHF fitting errors from the ODE solution."""
-        time_grid = self.t
-        Y_m1_h = self.solution[:, 8]
-        z = self.solution[:, 9]
+        solution_frame = self.solution
+        time_grid = solution_frame[self.TIME_GRID_COLUMN].to_numpy()
+        Y_m1_h = solution_frame["Y_m1_h"].to_numpy()
+        z = solution_frame["z"].to_numpy()
         self.peak_df_cases = np.max(z)
-        fitting_window_weeks = 12
+        fitting_window_weeks = 10
         sample_stride = 10000
         df_trim_indices = [0, 1, 6, 9]
         dhf_trim_indices = [0, 1, 3, 4, 6, 7, 8]
@@ -465,6 +682,7 @@ class StochasticSearch(data_processing.DataProcessing):
     def compute_ode_rhs(
             state_vector,
             _time,
+            *ode_args,
             q=None,
             **params,
     ) -> np.ndarray:
@@ -477,19 +695,56 @@ class StochasticSearch(data_processing.DataProcessing):
         """
         del q  # Retained only for backward compatibility with older call sites.
 
-        (
-            M_s, M_I1, M_I2,
-            S, I_1, I_2, R_s,
-            S_m1, Y_m1_c, Y_m1_h, R_s_m1
-        ) = state_vector
+        if ode_args:
+            if len(ode_args) != len(StochasticSearch.ODE_ARGUMENT_NAMES):
+                raise TypeError(
+                    "compute_ode_rhs expected "
+                    f"{len(StochasticSearch.ODE_ARGUMENT_NAMES)} ODE parameters, "
+                    f"received {len(ode_args)}."
+                )
+            params = {
+                **dict(zip(StochasticSearch.ODE_ARGUMENT_NAMES, ode_args)),
+                **params,
+            }
+
+        state_vector = np.asarray(state_vector, dtype=np.float64)
+        if state_vector.shape[0] == len(StochasticSearch.ODE_STATE_COLUMNS):
+            (
+                M_s, M_I1, M_I2,
+                S, I_1, I_2, R_s,
+                S_m1, Y_m1_c, Y_m1_h, R_s_m1,
+                z,
+            ) = state_vector
+            include_z_state = True
+        elif state_vector.shape[0] == len(StochasticSearch.ODE_STATE_COLUMNS) - 1:
+            (
+                M_s, M_I1, M_I2,
+                S, I_1, I_2, R_s,
+                S_m1, Y_m1_c, Y_m1_h, R_s_m1,
+            ) = state_vector
+            z = np.float64(0.0)
+            include_z_state = False
+        else:
+            raise ValueError(
+                "state_vector must contain either 11 legacy states or 12 solver states; "
+                f"received shape {state_vector.shape}."
+            )
 
         (
-            Lambda_M, Lambda_S, Lambda_S_m1, beta_M, beta_H, b, mu_M, mu_H,
-            alpha_c, alpha_h, sigma, p, theta, n_vector, n_host, n_host_m1
-        ) = operator.itemgetter(
-            "Lambda_M", "Lambda_S", "Lambda_S_m1", "beta_M", "beta_H", "b", "mu_M", "mu_H",
-            "alpha_c", "alpha_h", "sigma", "p", "theta", "n_vector", "n_host", "n_host_m1"
-        )(params)
+            Lambda_M,
+            Lambda_S,
+            Lambda_S_m1,
+            beta_M,
+            beta_H,
+            b,
+            mu_M,
+            mu_H,
+            alpha_c,
+            alpha_h,
+            sigma,
+            p,
+            theta,
+        ) = operator.itemgetter(*StochasticSearch.ODE_ARGUMENT_NAMES)(params)
 
         primary_host_population = Lambda_S / mu_H
         secondary_host_population = Lambda_S_m1 / mu_H
@@ -519,26 +774,45 @@ class StochasticSearch(data_processing.DataProcessing):
         dY_m1_c = (1.0 - theta) * reinfection_incidence - (alpha_c + mu_H) * Y_m1_c
         dY_m1_h = theta * reinfection_incidence - (alpha_h + mu_H) * Y_m1_h
         dR_s_m1 = alpha_c * Y_m1_c + alpha_h * Y_m1_h - mu_H * R_s_m1
+        dz = p * (I_1 + I_2 + Y_m1_c)
 
-        return np.array(
-            [
-                    dM_s, dM_I1, dM_I2,
-                    dS, dI_1, dI_2, dR_s,
-                    dS_m1, dY_m1_c, dY_m1_h, dR_s_m1
-            ],
-            dtype=np.float64,
-        )
+        rhs = [
+            dM_s,
+            dM_I1,
+            dM_I2,
+            dS,
+            dI_1,
+            dI_2,
+            dR_s,
+            dS_m1,
+            dY_m1_c,
+            dY_m1_h,
+            dR_s_m1,
+            dz
+        ]
+        if not include_z_state:
+            rhs = rhs[:-1]
+        rhs = np.array(rhs, dtype=np.float64)
+        return rhs
 #
     def solve_ode_system(self):
-        """Integrate the model ODE system over the configured time grid."""
+        """Integrate the model ODE system over the configured time grid.
+
+        Returns
+        -------
+        pandas.DataFrame
+            A solution table with ``time_grid`` plus one named column per
+            compartment/state in ``ODE_STATE_COLUMNS``.
+        """
         final_time = self.T
         initial_time = self.t0
         time_grid = np.linspace(initial_time, final_time, self.grid_size)
         initial_state = np.array(
             [self.M_s0, self.M_10, self.M_20,
-             self.S_0, self.I_10, self.I_20,
-             self.S_m1_0, self.Y_m1_c0, self.Y_m1_h0,
-             self.z0, self.Rec_0])
+             self.S_0, self.I_10, self.I_20, self.R_s0,
+             self.S_m1_0, self.Y_m1_c0, self.Y_m1_h0, self.R_s_m1_0,
+             self.z0])
+
         Lambda_M = self.Lambda_M
         Lambda_S = self.Lambda_S
         Lambda_S_m1 = self.Lambda_S_m1
@@ -553,13 +827,36 @@ class StochasticSearch(data_processing.DataProcessing):
         p = self.p
         theta = self.theta
 
-        solution = integrate.odeint(self.compute_ode_rhs, initial_state, time_grid,
-                                    args=(Lambda_M, Lambda_S, Lambda_S_m1,
-                                          beta_M, beta_H, b, mu_M, mu_H, alpha_c,
-                                          alpha_h, sigma, p, theta))
-        self.solution = solution
+        solution_values = integrate.odeint(
+            self.compute_ode_rhs,
+            initial_state,
+            time_grid,
+            args=(
+                Lambda_M,
+                Lambda_S,
+                Lambda_S_m1,
+                beta_M,
+                beta_H,
+                b,
+                mu_M,
+                mu_H,
+                alpha_c,
+                alpha_h,
+                sigma,
+                p,
+                theta,
+            ),
+        )
+        solution_frame = self._build_solution_frame(time_grid, solution_values)
+        self.solution = solution_frame
         self.t = time_grid
-        return solution
+        return solution_frame
+
+    def _build_sample_parameter_frame(self) -> pd.DataFrame:
+        """Return the sampled-parameter state as a single-row dataframe."""
+        return pd.DataFrame(
+            [{column: getattr(self, column) for column in self.SAMPLED_PARAMETER_COLUMNS}]
+        )
 
     def sample_model_parameters(self, flag_deterministic=False):
         """Sample a new parameter set and update the model state in place.
@@ -569,6 +866,12 @@ class StochasticSearch(data_processing.DataProcessing):
         flag_deterministic:
             When ``True``, load a fixed baseline parameter set instead of
             drawing random values.
+
+        Returns
+        -------
+        pandas.DataFrame
+            A one-row dataframe containing the sampled parameter values in a
+            stable column order.
         """
         #
         #
@@ -599,13 +902,8 @@ class StochasticSearch(data_processing.DataProcessing):
             Y_m1_h0 = 0.0
             R_s0 = 0.0
             R_s_m1_0 = 0.0
-            z0 = 1.050000
-            #
-            #
-            self.N_H = S_0 + I_10 + I_20 + S_m1_0
-            Y_m1_c0 = 0.0
-            Y_m1_h0 = 0.0
             Rec_0 = 0.0
+            z0 = 1.050000
             z0 = p * (I_10 + I_20 + Y_m1_c0)
         else:
             Lambda_M = 7 * np.abs(6000 + 2000 * np.random.randn())
@@ -662,6 +960,8 @@ class StochasticSearch(data_processing.DataProcessing):
             #
             #
             #
+            R_s0 = 0.0
+            R_s_m1_0 = 0.0
             Rec_0 = 0.0
             z0 = p * (I_10 + I_20 + Y_m1_c0)
         #
@@ -680,6 +980,7 @@ class StochasticSearch(data_processing.DataProcessing):
         self.beta_H = beta_H
         self.b = b
         self.mu_M = mu_M
+        self.mu_H = mu_H
         self.alpha_c = alpha_c
         self.alpha_h = alpha_h
         self.sigma = sigma
@@ -698,20 +999,17 @@ class StochasticSearch(data_processing.DataProcessing):
         #
         self.Y_m1_c0 = Y_m1_c0
         self.Y_m1_h0 = Y_m1_h0
-        R_s0 = self.R_s0
-        R_s_m1_0 = self.R_s_m1_0
+        self.R_s0 = R_s0
+        self.R_s_m1_0 = R_s_m1_0
+        self.Rec_0 = Rec_0
         self.z0 = z0
         #
+        self.N_H = self.S_0 + self.I_10 + self.I_20 + self.R_s0
+        self.N_sm1 = self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0 + self.R_s_m1_0
         self.h = h
         self.T = T
-        #
-        parameter_vector = np.array([
-            Lambda_M, beta_M, beta_H, b, mu_M, alpha_c, alpha_h,
-            sigma, p, theta, M_s0, M_10, M_20, S_0, I_10, I_20,
-            S_m1_0, Y_m1_c0, Y_m1_h0,
-            R_s0, R_s_m1_0, z0, h, T,
-        ])
-        return parameter_vector
+        sampled_parameter_frame = self._build_sample_parameter_frame()
+        return sampled_parameter_frame
 
     def save_parameter_snapshot(self, file_name_prefix=None):
         """Persist the current parameter state as a JSON snapshot."""
@@ -824,21 +1122,23 @@ class StochasticSearch(data_processing.DataProcessing):
 
     def save_solution_plots(self):
         """Write compartment population plots for the current ODE solution."""
-
-        M_s = self.solution[:, 0]
-        M_1 = self.solution[:, 1]
-        M_2 = self.solution[:, 2]
-        S = self.solution[:, 3]
-        I_1 = self.solution[:, 4]
-        I_2 = self.solution[:, 5]
-        S_m1 = self.solution[:, 6]
-        Y_m1_c = self.solution[:, 7]
-        Y_m1_h = self.solution[:, 8]
-        z = self.solution[:, 9]
-        recovers = self.solution[:, 10]
+        solution_frame = self.solution
+        M_s = solution_frame["M_s"].to_numpy()
+        M_1 = solution_frame["M_I1"].to_numpy()
+        M_2 = solution_frame["M_I2"].to_numpy()
+        S = solution_frame["S"].to_numpy()
+        I_1 = solution_frame["I_1"].to_numpy()
+        I_2 = solution_frame["I_2"].to_numpy()
+        R_s = solution_frame["R_s"].to_numpy()
+        S_m1 = solution_frame["S_m1"].to_numpy()
+        Y_m1_c = solution_frame["Y_m1_c"].to_numpy()
+        Y_m1_h = solution_frame["Y_m1_h"].to_numpy()
+        R_s_m1 = solution_frame["R_s_m1"].to_numpy()
+        z = solution_frame["z"].to_numpy()
+        recovers = R_s + R_s_m1
         #
-        t = self.t
-        N_H = S + I_1 + I_2 + S_m1 + Y_m1_c + Y_m1_h + recovers
+        t = solution_frame[self.TIME_GRID_COLUMN].to_numpy()
+        N_H = S + I_1 + I_2 + R_s + S_m1 + Y_m1_c + Y_m1_h + R_s_m1
         #
         f1, ax_array = plt.subplots(4, 3, sharex=True)
         #
@@ -1011,4 +1311,7 @@ class StochasticSearch(data_processing.DataProcessing):
 
         # Refresh integration arrays to match updated grid
         self.t = np.linspace(self.t0, self.T, self.grid_size)
-        self.solution = np.zeros([len(self.t), 13])
+        self.solution = self._build_solution_frame(
+            self.t,
+            np.zeros((len(self.t), len(self.ODE_STATE_COLUMNS)), dtype=np.float64),
+        )

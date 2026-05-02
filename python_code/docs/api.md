@@ -40,7 +40,8 @@ Primary responsibilities:
 Common methods:
 
 - `StochasticSearch(data_dir=None, runtime_dir=None)`: initialize the model
-- `solve_ode_system()`: run the ODE solver
+- `solve_ode_system()`: run the ODE solver and return a `pandas.DataFrame`
+  with `time_grid` plus one column per compartment state
 - `compute_fitting_errors()`: compute DF/DHF fit errors
 - `compute_basic_reproduction_numbers()`: compute the reproduction number components
 - `save_solution_plots()` and `save_fitting_plot()`: write plots

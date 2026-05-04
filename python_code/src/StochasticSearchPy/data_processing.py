@@ -303,21 +303,77 @@ class DataProcessing:
 
     @staticmethod
     def count_cases_by_date(frame: pd.DataFrame) -> pd.DataFrame:
-        """Aggregate case rows into one count per calendar date."""
-        counts = frame.copy()
-        counts["date"] = counts.index.normalize()
-        counts["date"] = pd.to_datetime(counts["date"])
-        counts.reset_index(drop=True, inplace=True)
+        """Aggregate case rows into a dense daily count table.
+
+        Missing calendar dates between the first and last reported cases are
+        included with a zero count so downstream rolling-window operations keep
+        their intended day-based meaning.
+        """
+        if frame.empty:
+            empty_counts = pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
+            empty_counts["count"] = pd.Series(dtype=int)
+            return empty_counts
+
+        case_dates = pd.to_datetime(frame.index).normalize()
         counts = (
-            counts.groupby(counts["date"].dt.normalize())
-            .size()
-            .reset_index(name="count")
-            .sort_values("date")
-            .reset_index(drop=True)
+            pd.Series(1, index=case_dates, name="count")
+            .groupby(level=0)
+            .sum()
+            .sort_index()
+            .to_frame()
         )
+        full_date_index = pd.date_range(
+            start=counts.index.min(),
+            end=counts.index.max(),
+            freq="D",
+            name="date",
+        )
+        counts = counts.reindex(full_date_index, fill_value=0)
         counts["count"] = counts["count"].astype(int)
-        counts.set_index("date", inplace=True)
         return counts
+
+    @staticmethod
+    def read_daily_frequency_table(path: Path) -> pd.DataFrame:
+        """Load a persisted daily count CSV with explicit ``date`` and ``count`` columns."""
+        frame = pd.read_csv(path)
+        required_columns = {"date", "count"}
+        if not required_columns.issubset(frame.columns):
+            raise ValueError(
+                f"Expected columns {sorted(required_columns)} in {path}, "
+                f"found {list(frame.columns)}."
+            )
+
+        counts = frame.loc[:, ["date", "count"]].copy()
+        counts["date"] = pd.to_datetime(counts["date"]).dt.normalize()
+        counts["count"] = pd.to_numeric(counts["count"], errors="raise").astype(int)
+        counts = counts.groupby("date", as_index=False)["count"].sum().sort_values("date")
+        counts.set_index("date", inplace=True)
+        full_date_index = pd.date_range(
+            start=counts.index.min(),
+            end=counts.index.max(),
+            freq="D",
+            name="date",
+        )
+        counts = counts.reindex(full_date_index, fill_value=0)
+        counts.index.name = "date"
+        return counts
+
+    @staticmethod
+    def compute_moving_average(
+        values: pd.Series | pd.DataFrame,
+        window_days: int,
+    ) -> pd.Series:
+        """Return a trailing moving average over daily counts."""
+        if isinstance(values, pd.DataFrame):
+            if "count" not in values.columns:
+                raise KeyError("Daily count dataframe must contain a 'count' column.")
+            series = values["count"]
+        else:
+            series = values
+        return series.astype(float).rolling(
+            window=window_days,
+            min_periods=window_days,
+        ).mean()
 
     @staticmethod
     def aggregate_daily_counts_by_week(frame: pd.DataFrame) -> pd.DataFrame:
@@ -333,8 +389,8 @@ class DataProcessing:
         weekly["count"] = weekly["count"].astype(int)
         return weekly
 
-    def build_daily_frequency_tables(self):
-        """Return DF and DHF daily frequency tables and persist them as CSV."""
+    def build_daily_frequency_tables(self, persist: bool = True):
+        """Return DF and DHF daily frequency tables and optionally persist them as CSV."""
         df_df, df_dhf = self.load_incidence_dataframes()
         freq_df = self.count_cases_by_date(df_df)
         freq_dhf = self.count_cases_by_date(df_dhf)
@@ -343,16 +399,17 @@ class DataProcessing:
         self.daily_df_frequency_table = freq_df
         self.daily_dhf_frequency_table = freq_dhf
 
-        freq_df.to_csv(
-            self.build_data_file_path("frequency_per_date_DF.csv"),
-            index=False,
-            date_format="%Y-%m-%d",
-        )
-        freq_dhf.to_csv(
-            self.build_data_file_path("frequency_per_date_DHF.csv"),
-            index=False,
-            date_format="%Y-%m-%d",
-        )
+        if persist:
+            freq_df.reset_index().to_csv(
+                self.build_data_file_path("frequency_per_date_DF.csv"),
+                index=False,
+                date_format="%Y-%m-%d",
+            )
+            freq_dhf.reset_index().to_csv(
+                self.build_data_file_path("frequency_per_date_DHF.csv"),
+                index=False,
+                date_format="%Y-%m-%d",
+            )
         return freq_df, freq_dhf
 
     def build_weekly_frequency_tables(self):

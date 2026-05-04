@@ -42,6 +42,13 @@ def _build_expected_daily_counts(data_dir, fever):
         .astype({"count": int})
     )
     expected.set_index("date", inplace=True)
+    full_date_index = pd.date_range(
+        start=expected.index.min(),
+        end=expected.index.max(),
+        freq="D",
+        name="date",
+    )
+    expected = expected.reindex(full_date_index, fill_value=0)
     return expected
 
 

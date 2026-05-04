@@ -120,8 +120,23 @@ def test_search_command_updates_timestamped_fitting_plot(tmp_path, monkeypatch, 
             (self.plots_dir / "populations_grid.png").write_text("plot", encoding="utf-8")
             return None
 
-        def save_parameter_snapshot(self):
-            return None
+        def save_acceptance_snapshot(
+            self,
+            sample_index=None,
+            snapshot_timestamp=None,
+            fitting_plot_file=None,
+            populations_plot_file=None,
+        ):
+            snapshot_path = self.output_dir / f"acceptance_snapshot_{snapshot_timestamp}.json"
+            snapshot_path.write_text(
+                (
+                    f"sample={sample_index}\n"
+                    f"fitting_plot={Path(fitting_plot_file).name}\n"
+                    f"populations_plot={Path(populations_plot_file).name}\n"
+                ),
+                encoding="utf-8",
+            )
+            return snapshot_path
 
         def save_input_data_plot(self):
             return None
@@ -147,8 +162,14 @@ def test_search_command_updates_timestamped_fitting_plot(tmp_path, monkeypatch, 
     captured = capsys.readouterr()
     fit_file = runtime_dir / "plots" / "fitting_DF_DHF_20260502T120000000000.png"
     accepted_log = runtime_dir / "accepted_samples.txt"
+    acceptance_snapshot = runtime_dir / "parameters" / "acceptance_snapshot_20260502T120000000000.json"
     assert exit_code == 0
     assert "accepted_sample=1" in captured.out
+    assert "acceptance_snapshot=" in captured.out
     assert fit_file.exists()
+    assert acceptance_snapshot.exists()
     assert len(set(FakeSearch.figure_ids)) == 1
-    assert accepted_log.read_text(encoding="utf-8").strip() == fit_file.name
+    assert accepted_log.read_text(encoding="utf-8").strip() == (
+        "sample=1 snapshot=acceptance_snapshot_20260502T120000000000.json "
+        "fitting_plot=fitting_DF_DHF_20260502T120000000000.png"
+    )

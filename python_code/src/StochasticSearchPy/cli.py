@@ -179,6 +179,7 @@ def run_search_command(args) -> int:
     }
 
     accepted_index = None
+    acceptance_snapshot_file = None
     accepted_log = sim.runtime_dir / "accepted_samples.txt"
     accepted_header = (
         "i       R_01        R_02        R_zero      error_DF    error_DHF   peak_DF     \n"
@@ -213,12 +214,20 @@ def run_search_command(args) -> int:
         if stop and accepted_index is None:
             accepted_index = i
             sim.save_solution_plots()
-            sim.save_parameter_snapshot()
-            timestamp = build_timestamp_string()
-            pop_file = sim.plots_dir / f"populations_grid_{timestamp}.png"
+            acceptance_timestamp = build_timestamp_string()
+            pop_file = sim.plots_dir / f"populations_grid_{acceptance_timestamp}.png"
             shutil.copy2(sim.plots_dir / "populations_grid.png", pop_file)
+            acceptance_snapshot_file = sim.save_acceptance_snapshot(
+                sample_index=i,
+                snapshot_timestamp=acceptance_timestamp,
+                fitting_plot_file=fit_file,
+                populations_plot_file=pop_file,
+            )
             with accepted_log.open("a", encoding="utf-8") as logf:
-                logf.write(f"{fit_file.name}\n")
+                logf.write(
+                    f"sample={i} snapshot={acceptance_snapshot_file.name} "
+                    f"fitting_plot={fit_file.name}\n"
+                )
             sys.stdout.write("\n")
             print(accepted_header)
             print(
@@ -234,6 +243,7 @@ def run_search_command(args) -> int:
                 )
             )
             print(f"accepted_sample={i}")
+            print(f"acceptance_snapshot={acceptance_snapshot_file}")
             break
     else:
         sys.stdout.write("\n")
@@ -251,7 +261,7 @@ def run_search_command(args) -> int:
         )
     plt.xlabel("Error DF")
     plt.ylabel("R0")
-    plt.title("Accepted samples search")
+    plt.title("Search progress until acceptance")
     plt.legend()
     plt.tight_layout()
     plt.savefig(sim.plots_dir / "accepted_samples.png")

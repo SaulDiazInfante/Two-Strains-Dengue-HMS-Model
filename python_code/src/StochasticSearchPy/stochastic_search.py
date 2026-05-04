@@ -185,6 +185,7 @@ class StochasticSearch(data_processing.DataProcessing):
         "z",
     )
     TIME_GRID_COLUMN = "time_grid"
+    TIME_DAY_COLUMN = "time_day"
     ODE_SOLUTION_COLUMNS = (TIME_GRID_COLUMN, *ODE_STATE_COLUMNS)
     FITTING_PLOT_FIGSIZE = (13.5, 7.5)
     FITTING_PLOT_LAYOUT = {
@@ -195,6 +196,17 @@ class StochasticSearch(data_processing.DataProcessing):
         "wspace": 0.18,
         "hspace": 0.34,
     }
+    DAYS_PER_WEEK = 7
+    FITTING_WINDOW_WEEKS = 10
+    MOVING_AVERAGE_WINDOW_DAYS = DAYS_PER_WEEK
+    # Recommended common 10-week fitting window start: 2010-09-13.
+    # This maps to DF index 10 and DHF index 6 in the weekly tables and keeps
+    # raw-data zero-case runs within the window to <= 3 consecutive days for
+    # both series.
+    DF_FITTING_START_INDEX = 12
+    DHF_FITTING_START_INDEX = 8
+    R_ZERO_ACCEPTANCE_THRESHOLD = 1.0
+    PEAK_DF_CASES_THRESHOLD = 700.0
 
     def __init__(self, data_dir=None, runtime_dir=None):
         super().__init__(data_dir=data_dir)
@@ -284,10 +296,10 @@ class StochasticSearch(data_processing.DataProcessing):
 
     def evaluate_search_acceptance(self):
         """Evaluate whether the current sample satisfies acceptance criteria."""
-        meets_r_zero_threshold = self.r_zero > 1
+        meets_r_zero_threshold = self.r_zero > self.R_ZERO_ACCEPTANCE_THRESHOLD
         meets_df_error_threshold = self.df_fit_error < self.df_error_threshold
         meets_dhf_error_threshold = self.dhf_fit_error < self.dhf_error_threshold
-        meets_peak_df_threshold = self.peak_df_cases < 700
+        meets_peak_df_threshold = self.peak_df_cases < self.PEAK_DF_CASES_THRESHOLD
         meets_acceptance_criteria = (
             meets_df_error_threshold
             and meets_dhf_error_threshold
@@ -315,6 +327,159 @@ class StochasticSearch(data_processing.DataProcessing):
             np.delete(sampled_weeks, trim_indices),
             np.delete(sampled_values, trim_indices),
         )
+
+    def _load_daily_frequency_tables_for_fitting(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Load daily DF/DHF tables, rebuilding them in memory if persisted CSVs are invalid."""
+        if (
+            not self.daily_df_frequency_table.empty
+            and not self.daily_dhf_frequency_table.empty
+        ):
+            return self.daily_df_frequency_table, self.daily_dhf_frequency_table
+
+        df_path = Path(self.build_data_file_path("frequency_per_date_DF.csv"))
+        dhf_path = Path(self.build_data_file_path("frequency_per_date_DHF.csv"))
+        try:
+            df_counts = self.read_daily_frequency_table(df_path)
+            dhf_counts = self.read_daily_frequency_table(dhf_path)
+        except (OSError, KeyError, ValueError, pd.errors.EmptyDataError, pd.errors.ParserError):
+            df_counts, dhf_counts = self.build_daily_frequency_tables(persist=False)
+
+        self.daily_df_frequency_table = df_counts
+        self.daily_dhf_frequency_table = dhf_counts
+        return df_counts, dhf_counts
+
+    @staticmethod
+    def _get_iso_week_start_date(observed_counts: pd.DataFrame, week_number: int) -> pd.Timestamp:
+        """Return the Monday starting the requested ISO week in the data year."""
+        if observed_counts.empty:
+            raise ValueError("Observed daily counts are empty; cannot resolve a fitting window.")
+
+        iso_year = int(observed_counts.index.min().isocalendar().year)
+        return pd.Timestamp(datetime.date.fromisocalendar(iso_year, int(week_number), 1))
+
+    def _build_daily_observed_fitting_series(
+        self,
+        observed_counts: pd.DataFrame,
+        start_week: int,
+    ) -> pd.DataFrame:
+        """Return a dense daily observed series for the configured fitting window."""
+        total_days = self.FITTING_WINDOW_WEEKS * self.DAYS_PER_WEEK
+        start_date = self._get_iso_week_start_date(observed_counts, start_week)
+        day_index = pd.date_range(start=start_date, periods=total_days, freq="D", name="date")
+        regularized_series = observed_counts.reindex(day_index, fill_value=0.0)
+        return regularized_series
+
+    @staticmethod
+    def _build_daily_simulated_fitting_series(
+        time_grid: np.ndarray,
+        simulated_values: np.ndarray,
+        start_week: int,
+        day_index: pd.DatetimeIndex,
+    ) -> pd.DataFrame:
+        """Interpolate a simulated weekly-time series onto one point per day."""
+        daily_time_points = start_week + (
+            np.arange(len(day_index), dtype=np.float64) / StochasticSearch.DAYS_PER_WEEK
+        )
+        daily_values = np.interp(daily_time_points, time_grid, simulated_values)
+        df_daily_values = pd.DataFrame(daily_values, index=day_index, dtype=np.float64)
+        return df_daily_values
+
+    def _build_daily_fitting_frame(
+        self,
+        observed_counts: pd.DataFrame,
+        time_grid: np.ndarray,
+        simulated_values: np.ndarray,
+        start_week: int,
+    ) -> pd.DataFrame:
+        """Build the observed/simulated daily fitting series for one outcome."""
+        observed_daily = self._build_daily_observed_fitting_series(observed_counts, start_week)
+        simulated_daily = self._build_daily_simulated_fitting_series(
+            time_grid,
+            simulated_values,
+            start_week,
+            observed_daily.index,
+        )
+        observed_average = self.compute_moving_average(
+            observed_daily,
+            self.MOVING_AVERAGE_WINDOW_DAYS,
+        )
+        simulated_average = self.compute_moving_average(
+            simulated_daily,
+            self.MOVING_AVERAGE_WINDOW_DAYS,
+        )
+        fitting_frame = pd.DataFrame(
+            {
+                "time_week": start_week
+                + (np.arange(len(observed_daily), dtype=np.float64) / self.DAYS_PER_WEEK),
+                "observed_daily": observed_daily.to_numpy(dtype=np.float64),
+                "simulated_daily": simulated_daily.to_numpy(dtype=np.float64),
+                "observed_moving_average": observed_average.to_numpy(dtype=np.float64),
+                "simulated_moving_average": simulated_average.to_numpy(dtype=np.float64),
+            },
+            index=observed_daily.index,
+        )
+        fitting_frame.index.name = "date"
+        return fitting_frame
+
+    @staticmethod
+    def _compute_moving_average_fit_error(fitting_frame: pd.DataFrame) -> float:
+        """Compute an infinity-norm fit error from a daily fitting comparison frame."""
+        valid_rows = fitting_frame.dropna(
+            subset=["observed_moving_average", "simulated_moving_average"]
+        )
+        return float(
+            np.linalg.norm(
+                valid_rows["observed_moving_average"].to_numpy()
+                - valid_rows["simulated_moving_average"].to_numpy(),
+                ord=np.inf,
+            )
+        )
+
+    def _build_fitting_comparison_frames(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Return the DF and DHF fitting comparison frames for the current solution."""
+        solution_frame = self.solution
+        time_grid = solution_frame[self.TIME_GRID_COLUMN].to_numpy()
+        z = solution_frame["z"].to_numpy()
+
+        dengue_fever_incidence = solution_frame[
+            ["I_1", "I_2", "Y_m1_c"]
+        ].sum(axis=1).to_numpy()
+        Y_m1_h = solution_frame["Y_m1_h"].to_numpy()
+        daily_df_counts, daily_dhf_counts = self._load_daily_frequency_tables_for_fitting()
+
+        df_start_week = self._resolve_fitting_start_week(
+            self.weekly_df_frequency_array,
+            self.DF_FITTING_START_INDEX,
+        )
+        dhf_start_week = self._resolve_fitting_start_week(
+            self.weekly_dhf_frequency_array,
+            self.DHF_FITTING_START_INDEX,
+        )
+        start_week = np.max([df_start_week, dhf_start_week])
+        df_frame = self._build_daily_fitting_frame(
+            daily_df_counts,
+            time_grid,
+            dengue_fever_incidence,
+            start_week,
+        )
+        dhf_frame = self._build_daily_fitting_frame(
+            daily_dhf_counts,
+            time_grid,
+            Y_m1_h,
+            start_week,
+        )
+        return df_frame, dhf_frame
+
+    @staticmethod
+    def _resolve_fitting_start_week(
+        weekly_frequency_array: np.ndarray,
+        preferred_index: int,
+    ) -> int:
+        """Return the preferred fitting start week, clamped to available observations."""
+        if weekly_frequency_array.size == 0:
+            raise ValueError("Weekly frequency data are empty; cannot resolve a fitting start week.")
+        clamped_index = min(int(preferred_index), len(weekly_frequency_array) - 1)
+        return int(weekly_frequency_array[clamped_index, 0])
 
     def _build_solution_frame(
         self,
@@ -401,33 +566,20 @@ class StochasticSearch(data_processing.DataProcessing):
         -----
         The figure contains four subplots:
         - Top left: Reported DF time series
-        - Top right: DF fitting comparison with error metric
+        - Top right: DF 7-day moving-average fitting comparison
         - Bottom left: DHF time series
-        - Bottom right: DHF fitting comparison with error metric
+        - Bottom right: DHF 7-day moving-average fitting comparison
         """
         solution_frame = self.solution
         time_grid = solution_frame[self.TIME_GRID_COLUMN].to_numpy()
         Y_m1_h = solution_frame["Y_m1_h"].to_numpy()
         z = solution_frame["z"].to_numpy()
-        df_observed_weeks = self.weekly_df_frequency_array[3:, 0]
-        dhf_observed_weeks = self.weekly_dhf_frequency_array[1:, 0]
-        weekly_df_counts = self.weekly_df_frequency_array[3:, 1]
-        weekly_dhf_counts = self.weekly_dhf_frequency_array[1:, 1]
-        sample_stride = 10000
-        df_trim_indices = [0, 1, 6, 9]
-        dhf_trim_indices = [0, 1, 3, 4, 6, 7, 8]
-        sampled_df_weeks, sampled_df_counts = self._sample_weekly_solution_points(
-            time_grid, z, sample_stride, df_trim_indices
-        )
-        sampled_dhf_weeks, sampled_dhf_counts = self._sample_weekly_solution_points(
-            time_grid, Y_m1_h, sample_stride, dhf_trim_indices
-        )
+        df_fitting_frame, dhf_fitting_frame = self._build_fitting_comparison_frames()
 
         if figure is None:
             figure, axes = plt.subplots(
                 2,
                 2,
-                sharex="row",
                 figsize=self.FITTING_PLOT_FIGSIZE,
                 constrained_layout=False,
             )
@@ -439,7 +591,7 @@ class StochasticSearch(data_processing.DataProcessing):
                     axis.cla()
             else:
                 figure.clear()
-                axes = figure.subplots(2, 2, sharex="row")
+                axes = figure.subplots(2, 2)
         if hasattr(figure, "set_layout_engine"):
             figure.set_layout_engine(None)
         figure.subplots_adjust(**self.FITTING_PLOT_LAYOUT)
@@ -456,108 +608,122 @@ class StochasticSearch(data_processing.DataProcessing):
             floor=0.0,
         )
 
-        # Right column: fitting view scaled only by the observed frequencies.
+        # Right column: fitting view on the 7-day moving-average comparison window.
         df_right_ymin, df_right_ymax = self._calculate_padded_limits(
-            weekly_df_counts,
+            df_fitting_frame["observed_moving_average"],
+            df_fitting_frame["simulated_moving_average"],
             pad=0.15,
             floor=0.0,
         )
         dhf_right_ymin, dhf_right_ymax = self._calculate_padded_limits(
-            weekly_dhf_counts,
+            dhf_fitting_frame["observed_moving_average"],
+            dhf_fitting_frame["simulated_moving_average"],
             pad=0.15,
             floor=0.0,
         )
-        df_xmin, df_xmax = self._calculate_padded_limits(
+        df_left_xmin, df_left_xmax = self._calculate_padded_limits(
             time_grid,
-            df_observed_weeks,
-            sampled_df_weeks,
             pad=0.02,
         )
-        dhf_xmin, dhf_xmax = self._calculate_padded_limits(
+        dhf_left_xmin, dhf_left_xmax = self._calculate_padded_limits(
             time_grid,
-            dhf_observed_weeks,
-            sampled_dhf_weeks,
+            pad=0.02,
+        )
+        df_right_xmin, df_right_xmax = self._calculate_padded_limits(
+            df_fitting_frame["time_week"],
+            pad=0.02,
+        )
+        dhf_right_xmin, dhf_right_xmax = self._calculate_padded_limits(
+            dhf_fitting_frame["time_week"],
             pad=0.02,
         )
 
         axes[0, 0].plot(time_grid, z, 'b-')
         axes[0, 0].set_title(r'Reported DF ')
-        axes[0, 0].set_xlim(df_xmin, df_xmax)
+        axes[0, 0].set_xlim(df_left_xmin, df_left_xmax)
         axes[0, 0].set_ylim(df_left_ymin, df_left_ymax)
 
-        axes[0, 1].plot(df_observed_weeks, weekly_df_counts,
-                        ls='--',
-                        color='lightblue',
-                        marker='o',
-                        ms=8,
-                        mfc='lightblue',
-                        alpha=0.7)
-        axes[0, 1].plot(time_grid, z,
-                        ls=':',
-                        color='darkblue',
-                        alpha=0.3)
-        axes[0, 1].plot(sampled_df_weeks, sampled_df_counts,
-                        ls='none',
-                        color='blue',
-                        marker='*',
-                        ms=8,
-                        mfc='blue',
-                        alpha=0.5)
+        axes[0, 1].plot(
+            df_fitting_frame["time_week"],
+            df_fitting_frame["observed_moving_average"],
+            ls='--',
+            color='lightblue',
+            marker='o',
+            ms=4,
+            mfc='lightblue',
+            alpha=0.75,
+            label='Observed 7-day average',
+        )
+        axes[0, 1].plot(
+            df_fitting_frame["time_week"],
+            df_fitting_frame["simulated_moving_average"],
+            ls='-',
+            color='darkblue',
+            alpha=0.8,
+            label='Simulated 7-day average',
+        )
         self._add_metric_annotation(
             axes[0, 1],
             'err=' + str(np.round(self.df_fit_error, 1)),
-            (df_xmin, df_xmax),
+            (df_right_xmin, df_right_xmax),
             (df_right_ymin, df_right_ymax),
         )
         axes[0, 1].set_ylim(df_right_ymin, df_right_ymax)
-        axes[0, 1].set_xlim(df_xmin, df_xmax)
-        axes[0, 1].set_title(r'DF Fitting ')
+        axes[0, 1].set_xlim(df_right_xmin, df_right_xmax)
+        axes[0, 1].set_title(r'DF Fitting (7-day average)')
+        axes[0, 1].legend(loc='upper right', fontsize=8)
 
         axes[1, 0].plot(time_grid, Y_m1_h, 'r-')
         axes[1, 0].set_title(r'DHF')
-        axes[1, 0].set_xlim(dhf_xmin, dhf_xmax)
+        axes[1, 0].set_xlim(dhf_left_xmin, dhf_left_xmax)
         axes[1, 0].set_ylim(dhf_left_ymin, dhf_left_ymax)
-        axes[1, 1].plot(dhf_observed_weeks, weekly_dhf_counts,
-                        ls='--',
-                        color='orange',
-                        marker='o',
-                        ms=8,
-                        mfc='orange',
-                        alpha=0.5)
-        axes[1, 1].plot(time_grid, Y_m1_h,
-                        ls=':',
-                        color='crimson',
-                        alpha=0.5
-                        )
-        axes[1, 1].plot(sampled_dhf_weeks, sampled_dhf_counts,
-                        ls='none',
-                        color='crimson',
-                        marker='*'
-                        )
+        axes[1, 1].plot(
+            dhf_fitting_frame["time_week"],
+            dhf_fitting_frame["observed_moving_average"],
+            ls='--',
+            color='orange',
+            marker='o',
+            ms=4,
+            mfc='orange',
+            alpha=0.7,
+            label='Observed 7-day average',
+        )
+        axes[1, 1].plot(
+            dhf_fitting_frame["time_week"],
+            dhf_fitting_frame["simulated_moving_average"],
+            ls='-',
+            color='crimson',
+            alpha=0.8,
+            label='Simulated 7-day average',
+        )
         self._add_metric_annotation(
             axes[1, 1],
             'err=' + str(np.round(self.dhf_fit_error, 1)),
-            (dhf_xmin, dhf_xmax),
+            (dhf_right_xmin, dhf_right_xmax),
             (dhf_right_ymin, dhf_right_ymax),
         )
         axes[1, 1].set_ylim(dhf_right_ymin, dhf_right_ymax)
-        axes[1, 1].set_xlim(dhf_xmin, dhf_xmax)
-        axes[1, 1].set_title(r'DHF Fitting ')
+        axes[1, 1].set_xlim(dhf_right_xmin, dhf_right_xmax)
+        axes[1, 1].set_title(r'DHF Fitting (7-day average)')
+        axes[1, 1].legend(loc='upper right', fontsize=8)
 
-        for column_index in np.arange(2):
-            axes[1, column_index].set(xlabel='week n')
-            axes[1, column_index].xaxis.set_label_coords(0.5, -0.14)
         for row_index in np.arange(2):
-            axes[row_index, 0].set(ylabel='Individuals')
-            axes[row_index, 0].yaxis.set_label_coords(-0.075, 0.5)
+            for column_index in np.arange(2):
+                axes[row_index, column_index].set(xlabel='week n')
+                axes[row_index, column_index].xaxis.set_label_coords(0.5, -0.14)
+        axes[0, 0].set(ylabel='Individuals')
+        axes[1, 0].set(ylabel='Individuals')
+        axes[0, 1].set(ylabel='7-day average cases')
+        axes[1, 1].set(ylabel='7-day average cases')
 
         return figure
     
     def save_fitting_plot(self):
         """Save the DF/DHF fitting comparison figure to disk.
-    
-        Creates a 2x2 subplot figure comparing observed weekly DF/DHF counts
-        with model simulation results and saves it to the plots directory.
+
+        Creates a 2x2 subplot figure comparing the full simulated DF/DHF
+        trajectories plus the 7-day moving-average fitting windows used in the
+        error metric, then saves it to the plots directory.
         The file is saved as ``fitting_DF_DHF.png`` in ``self.plots_dir``.
         """
         figure = self.create_fitting_plot()
@@ -649,34 +815,13 @@ class StochasticSearch(data_processing.DataProcessing):
         plt.close(fig)
 
     def compute_fitting_errors(self):
-        """Compute the current DF and DHF fitting errors from the ODE solution."""
+        """Compute the current DF and DHF fitting errors from 7-day moving averages."""
         solution_frame = self.solution
-        time_grid = solution_frame[self.TIME_GRID_COLUMN].to_numpy()
-        Y_m1_h = solution_frame["Y_m1_h"].to_numpy()
         z = solution_frame["z"].to_numpy()
         self.peak_df_cases = np.max(z)
-        fitting_window_weeks = 10
-        sample_stride = 10000
-        df_trim_indices = [0, 1, 6, 9]
-        dhf_trim_indices = [0, 1, 3, 4, 6, 7, 8]
-        weekly_df_counts = self.weekly_df_frequency_array[3:, 1]
-        weekly_dhf_counts = self.weekly_dhf_frequency_array[1:, 1]
-        _, sampled_df_counts = self._sample_weekly_solution_points(
-            time_grid, z, sample_stride, df_trim_indices
-        )
-        _, sampled_dhf_counts = self._sample_weekly_solution_points(
-            time_grid, Y_m1_h, sample_stride, dhf_trim_indices
-        )
-        df_fit_error = np.linalg.norm(
-            weekly_df_counts[:fitting_window_weeks] - sampled_df_counts[:fitting_window_weeks],
-            ord=np.inf,
-        )
-        self.df_fit_error = df_fit_error
-        dhf_fit_error = np.linalg.norm(
-            weekly_dhf_counts[:fitting_window_weeks] - sampled_dhf_counts[:fitting_window_weeks],
-            ord=np.inf,
-        )
-        self.dhf_fit_error = dhf_fit_error
+        df_fitting_frame, dhf_fitting_frame = self._build_fitting_comparison_frames()
+        self.df_fit_error = self._compute_moving_average_fit_error(df_fitting_frame)
+        self.dhf_fit_error = self._compute_moving_average_fit_error(dhf_fitting_frame)
 
     @staticmethod
     def compute_ode_rhs(
@@ -1011,74 +1156,266 @@ class StochasticSearch(data_processing.DataProcessing):
         sampled_parameter_frame = self._build_sample_parameter_frame()
         return sampled_parameter_frame
 
-    def save_parameter_snapshot(self, file_name_prefix=None):
-        """Persist the current parameter state as a JSON snapshot."""
-
-        # load parameters
-        Lambda_M = self.Lambda_M
-        Lambda_S = self.Lambda_S
-        Lambda_S_m1 = self.Lambda_S_m1
-        beta_M = self.beta_M
-        beta_H = self.beta_H
-        b = self.b
-        mu_M = self.mu_M
-        mu_H = self.mu_H
-        alpha_c = self.alpha_c
-        alpha_h = self.alpha_h
-        sigma = self.sigma
-        p = self.p
-        theta = self.theta
-        M_s0 = self.M_s0
-        M_10 = self.M_10
-        M_20 = self.M_20
-        S_0 = self.S_0
-        I_10 = self.I_10
-        I_20 = self.I_20
-        S_m1_0 = self.S_m1_0
-        Y_m1_c0 = self.Y_m1_c0
-        Y_m1_h0 = self.Y_m1_h0
-        R_s0 = self.R_s0
-        R_s_m1_0 = self.R_s_m1_0
-        z0 = self.z0
-        h = self.h
-        T = self.T
-        r_zero = self.r_zero
-        parameters = {
-            'Lambda_M': float(Lambda_M),
-            'Lambda_S': float(Lambda_S),
-            'Lambda_S_m1': float(Lambda_S_m1),
-            'beta_M': float(beta_M),
-            'beta_H': float(beta_H),
-            'b': float(b),
-            'mu_M': float(mu_M),
-            'mu_H': float(mu_H),
-            'alpha_c': float(alpha_c),
-            'alpha_h': float(alpha_h),
-            'sigma': float(sigma),
-            'p': float(p),
-            'theta': float(theta),
-            'M_s0': float(M_s0),
-            'M_10': float(M_10),
-            'M_20': float(M_20),
-            'S_0': float(S_0),
-            'I_10': float(I_10),
-            'I_20': float(I_20),
-            'S_m1_0': float(S_m1_0),
-            'Y_m1_c0': float(Y_m1_c0),
-            'Y_m1_h0': float(Y_m1_h0),
-            'R_s0': float(R_s0),
-            'R_s_m1_0': float(R_s_m1_0),
-            'z0': float(z0),
-            'h': float(h),
-            'T': float(T),
-            'r_zero': float(r_zero)
+    def _build_parameter_snapshot_dict(self) -> dict:
+        """Return the current parameter and metric state as JSON-serializable scalars."""
+        return {
+            'Lambda_M': float(self.Lambda_M),
+            'Lambda_S': float(self.Lambda_S),
+            'Lambda_S_m1': float(self.Lambda_S_m1),
+            'beta_M': float(self.beta_M),
+            'beta_H': float(self.beta_H),
+            'b': float(self.b),
+            'mu_M': float(self.mu_M),
+            'mu_H': float(self.mu_H),
+            'alpha_c': float(self.alpha_c),
+            'alpha_h': float(self.alpha_h),
+            'sigma': float(self.sigma),
+            'p': float(self.p),
+            'theta': float(self.theta),
+            'M_s0': float(self.M_s0),
+            'M_10': float(self.M_10),
+            'M_20': float(self.M_20),
+            'S_0': float(self.S_0),
+            'I_10': float(self.I_10),
+            'I_20': float(self.I_20),
+            'S_m1_0': float(self.S_m1_0),
+            'Y_m1_c0': float(self.Y_m1_c0),
+            'Y_m1_h0': float(self.Y_m1_h0),
+            'R_s0': float(self.R_s0),
+            'R_s_m1_0': float(self.R_s_m1_0),
+            'Rec_0': float(self.Rec_0),
+            'z0': float(self.z0),
+            't0': float(self.t0),
+            'h': float(self.h),
+            'T': float(self.T),
+            'grid_size': int(self.grid_size),
+            'N_H': float(self.N_H),
+            'N_sm1': float(self.N_sm1),
+            'r_01': float(self.r_01),
+            'r_02': float(self.r_02),
+            'r_zero': float(self.r_zero),
+            'df_fit_error': float(self.df_fit_error),
+            'dhf_fit_error': float(self.dhf_fit_error),
+            'peak_df_cases': float(self.peak_df_cases),
+            'meets_r_zero_threshold': bool(self.meets_r_zero_threshold),
+            'meets_df_error_threshold': bool(self.meets_df_error_threshold),
+            'meets_dhf_error_threshold': bool(self.meets_dhf_error_threshold),
+            'meets_acceptance_criteria': bool(self.meets_acceptance_criteria),
         }
 
-        str_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-        prefix = file_name_prefix or str(self.output_dir / 'parameters_')
-        file_name = prefix + str_time + '.json'
-        with open(file_name, 'w') as outfile:
+    def save_parameter_snapshot(self, file_name_prefix=None, file_path=None):
+        """Persist the current parameter state as a JSON snapshot."""
+        parameters = self._build_parameter_snapshot_dict()
+        if file_path is not None:
+            output_path = Path(file_path)
+        else:
+            str_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+            prefix = file_name_prefix or str(self.output_dir / 'parameters_')
+            output_path = Path(f"{prefix}{str_time}.json")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open('w', encoding='utf-8') as outfile:
             json.dump(parameters, outfile, indent=2)
+        return output_path
+
+    def save_solution_snapshot(self, file_path) -> Path:
+        """Persist the current ODE solution table as CSV."""
+        output_path = Path(file_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.solution.to_csv(output_path, index=False)
+        return output_path
+
+    def build_sampled_solution_time_series(self, sample_interval_days: int = 1) -> pd.DataFrame:
+        """Return the current ODE solution sampled onto a day-based time axis.
+
+        The native solver state is stored on a dense weekly grid. This helper
+        interpolates each state onto evenly-spaced daily samples so downstream
+        analysis can handle the solution as a regular time series.
+        """
+        if sample_interval_days <= 0:
+            raise ValueError("sample_interval_days must be a positive integer.")
+
+        solution_frame = self.solution
+        time_weeks = solution_frame[self.TIME_GRID_COLUMN].to_numpy(dtype=np.float64)
+        if time_weeks.size == 0:
+            return pd.DataFrame(columns=[self.TIME_DAY_COLUMN, *self.ODE_SOLUTION_COLUMNS])
+
+        start_week = float(time_weeks[0])
+        end_week = float(time_weeks[-1])
+        total_days = int(round((end_week - start_week) * self.DAYS_PER_WEEK))
+        sampled_days = np.arange(0, total_days + 1, sample_interval_days, dtype=int)
+        if sampled_days[-1] != total_days:
+            sampled_days = np.append(sampled_days, total_days)
+
+        sampled_weeks = start_week + (
+            sampled_days.astype(np.float64) / self.DAYS_PER_WEEK
+        )
+        sampled_solution = {
+            self.TIME_DAY_COLUMN: sampled_days,
+            self.TIME_GRID_COLUMN: sampled_weeks,
+        }
+        for column in self.ODE_STATE_COLUMNS:
+            sampled_solution[column] = np.interp(
+                sampled_weeks,
+                time_weeks,
+                solution_frame[column].to_numpy(dtype=np.float64),
+            )
+        return pd.DataFrame(sampled_solution)
+
+    def save_sampled_solution_time_series(
+        self,
+        file_path=None,
+        sample_interval_days: int = 1,
+    ) -> Path:
+        """Persist a day-sampled solution time series as CSV."""
+        output_path = (
+            Path(file_path)
+            if file_path is not None
+            else self.output_dir / "solution_time_series.csv"
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sampled_solution = self.build_sampled_solution_time_series(
+            sample_interval_days=sample_interval_days,
+        )
+        sampled_solution.to_csv(output_path, index=False)
+        return output_path
+
+    def load_solution_snapshot(self, file_path) -> pd.DataFrame:
+        """Load a previously-saved ODE solution CSV into the current instance."""
+        solution_frame = pd.read_csv(file_path)
+        expected_columns = list(self.ODE_SOLUTION_COLUMNS)
+        if list(solution_frame.columns) != expected_columns:
+            raise ValueError(
+                "Solution snapshot columns must match ODE_SOLUTION_COLUMNS; "
+                f"received {list(solution_frame.columns)}."
+            )
+        solution_frame = solution_frame.astype(np.float64)
+        self.solution = solution_frame
+        self.t = solution_frame[self.TIME_GRID_COLUMN].to_numpy(dtype=np.float64)
+        self.grid_size = len(solution_frame.index)
+        if self.grid_size > 1:
+            self.h = np.float64(self.t[1] - self.t[0])
+        return solution_frame
+
+    def _serialize_fitting_frame(self, fitting_frame: pd.DataFrame) -> list[dict]:
+        """Return a fitting comparison frame as JSON-friendly records."""
+        serialized_frame = fitting_frame.reset_index().copy()
+        serialized_frame["date"] = serialized_frame["date"].dt.strftime("%Y-%m-%d")
+        return serialized_frame.to_dict(orient="records")
+
+    def _build_acceptance_snapshot_dict(
+        self,
+        sample_index=None,
+        snapshot_timestamp=None,
+        parameter_file=None,
+        solution_file=None,
+        solution_time_series_file=None,
+        fitting_plot_file=None,
+        populations_plot_file=None,
+    ) -> dict:
+        """Build a reproducibility bundle for the current accepted state."""
+        r01_per_week, r02_per_week, r0_per_week = self.compute_basic_reproduction_numbers()
+        accepted = self.evaluate_search_acceptance()
+        df_fitting_frame, dhf_fitting_frame = self._build_fitting_comparison_frames()
+
+        def normalize_path(path):
+            if path is None:
+                return None
+            path = Path(path)
+            try:
+                return str(path.relative_to(self.runtime_dir))
+            except ValueError:
+                return str(path)
+
+        return {
+            "created_at": snapshot_timestamp or datetime.datetime.now().isoformat(timespec="seconds"),
+            "sample_index": None if sample_index is None else int(sample_index),
+            "data_dir": str(self.data_dir),
+            "runtime_dir": str(self.runtime_dir),
+            "parameters": self._build_parameter_snapshot_dict(),
+            "acceptance_thresholds": {
+                "r_zero_min": float(self.R_ZERO_ACCEPTANCE_THRESHOLD),
+                "df_fit_error_max": float(self.df_error_threshold),
+                "dhf_fit_error_max": float(self.dhf_error_threshold),
+                "peak_df_cases_max": float(self.PEAK_DF_CASES_THRESHOLD),
+                "fitting_window_weeks": int(self.FITTING_WINDOW_WEEKS),
+                "moving_average_window_days": int(self.MOVING_AVERAGE_WINDOW_DAYS),
+                "df_fitting_start_index": int(self.DF_FITTING_START_INDEX),
+                "dhf_fitting_start_index": int(self.DHF_FITTING_START_INDEX),
+                "df_fitting_start_week": self._resolve_fitting_start_week(
+                    self.weekly_df_frequency_array,
+                    self.DF_FITTING_START_INDEX,
+                ),
+                "dhf_fitting_start_week": self._resolve_fitting_start_week(
+                    self.weekly_dhf_frequency_array,
+                    self.DHF_FITTING_START_INDEX,
+                ),
+            },
+            "acceptance_metrics": {
+                "r01_per_week": float(r01_per_week),
+                "r02_per_week": float(r02_per_week),
+                "r0_per_week": float(r0_per_week),
+                "df_fit_error": float(self.df_fit_error),
+                "dhf_fit_error": float(self.dhf_fit_error),
+                "peak_df_cases": float(self.peak_df_cases),
+                "meets_r_zero_threshold": bool(self.meets_r_zero_threshold),
+                "meets_df_error_threshold": bool(self.meets_df_error_threshold),
+                "meets_dhf_error_threshold": bool(self.meets_dhf_error_threshold),
+                "meets_acceptance_criteria": bool(accepted),
+            },
+            "artifacts": {
+                "parameter_snapshot": normalize_path(parameter_file),
+                "solution_snapshot": normalize_path(solution_file),
+                "solution_time_series": normalize_path(solution_time_series_file),
+                "fitting_plot": normalize_path(fitting_plot_file),
+                "populations_plot": normalize_path(populations_plot_file),
+            },
+            "df_fitting_window": self._serialize_fitting_frame(df_fitting_frame),
+            "dhf_fitting_window": self._serialize_fitting_frame(dhf_fitting_frame),
+        }
+
+    def save_acceptance_snapshot(
+        self,
+        sample_index=None,
+        snapshot_timestamp=None,
+        parameter_file=None,
+        solution_file=None,
+        solution_time_series_file=None,
+        fitting_plot_file=None,
+        populations_plot_file=None,
+    ) -> Path:
+        """Persist a reproducibility bundle for the current accepted state."""
+        timestamp = snapshot_timestamp or datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        parameter_path = (
+            Path(parameter_file)
+            if parameter_file is not None
+            else self.output_dir / f"parameters_{timestamp}.json"
+        )
+        solution_path = (
+            Path(solution_file)
+            if solution_file is not None
+            else self.output_dir / f"solution_{timestamp}.csv"
+        )
+        solution_time_series_path = (
+            Path(solution_time_series_file)
+            if solution_time_series_file is not None
+            else self.output_dir / f"solution_time_series_{timestamp}.csv"
+        )
+        self.save_parameter_snapshot(file_path=parameter_path)
+        self.save_solution_snapshot(solution_path)
+        self.save_sampled_solution_time_series(file_path=solution_time_series_path)
+        snapshot_path = self.output_dir / f"acceptance_snapshot_{timestamp}.json"
+        snapshot = self._build_acceptance_snapshot_dict(
+            sample_index=sample_index,
+            snapshot_timestamp=timestamp,
+            parameter_file=parameter_path,
+            solution_file=solution_path,
+            solution_time_series_file=solution_time_series_path,
+            fitting_plot_file=fitting_plot_file,
+            populations_plot_file=populations_plot_file,
+        )
+        with snapshot_path.open('w', encoding='utf-8') as outfile:
+            json.dump(snapshot, outfile, indent=2)
+        return snapshot_path
 
     def compute_basic_reproduction_numbers(self):
         """Compute the basic reproduction number and its two components."""
@@ -1291,6 +1628,8 @@ class StochasticSearch(data_processing.DataProcessing):
         self.S_m1_0 = get_float('S_m1_0', self.S_m1_0)
         self.Y_m1_c0 = get_float('Y_m1_c0', self.Y_m1_c0)
         self.Y_m1_h0 = get_float('Y_m1_h0', self.Y_m1_h0)
+        self.R_s0 = get_float('R_s0', self.R_s0)
+        self.R_s_m1_0 = get_float('R_s_m1_0', self.R_s_m1_0)
         self.Rec_0 = get_float('Rec_0', self.Rec_0)
         self.z0 = get_float('z0', self.z0)
 
@@ -1304,8 +1643,8 @@ class StochasticSearch(data_processing.DataProcessing):
         self.r_zero = get_float('r_zero', self.r_zero)
 
         # Derived populations and inflows (use provided value if present, else recompute)
-        self.N_H = get_float('N_H', self.S_0 + self.I_10 + self.I_20 + self.S_m1_0)
-        self.N_sm1 = get_float('N_sm1', self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0)
+        self.N_H = get_float('N_H', self.S_0 + self.I_10 + self.I_20 + self.R_s0)
+        self.N_sm1 = get_float('N_sm1', self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0 + self.R_s_m1_0)
         self.Lambda_S_m1 = get_float('Lambda_S_m1', 0.1 * self.mu_H * self.N_H)
         self.Lambda_S = get_float('Lambda_S', 0.9 * self.mu_H * self.N_H)
 

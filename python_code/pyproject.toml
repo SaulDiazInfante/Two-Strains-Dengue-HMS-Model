@@ -27,6 +27,10 @@ dev = [
 docs = [
   "mkdocs>=1.6",
 ]
+ui = [
+  "plotly>=5.24",
+  "streamlit>=1.39",
+]
 
 [project.scripts]
 two-strains-dengue = "StochasticSearchPy.cli:run_cli"

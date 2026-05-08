@@ -92,6 +92,13 @@ Run the stochastic search:
 two-strains-dengue search --data-dir ./artifacts/data --runtime-dir ./artifacts --samples 1
 ```
 
+Launch the interactive plotting frontend:
+
+```bash
+python -m pip install -e ".[ui]"
+two-strains-dengue interactive-plot --csv ./artifacts/data/frequency_per_date_DF.csv --index-column date
+```
+
 ## Data management
 
 The package no longer bundles the 64 MB reference dataset inside the wheel. That keeps builds and installs smaller and makes the runtime data dependency explicit.

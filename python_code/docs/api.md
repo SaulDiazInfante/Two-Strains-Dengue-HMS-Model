@@ -62,3 +62,4 @@ The package installs the `two-strains-dengue` command.
 - `two-strains-dengue smoke --data-dir ./artifacts/data --runtime-dir ./artifacts`
 - `two-strains-dengue frequency-tables --data-dir ./artifacts/data`
 - `two-strains-dengue search --data-dir ./artifacts/data --runtime-dir ./artifacts --samples 1`
+- `two-strains-dengue interactive-plot --csv ./artifacts/data/frequency_per_date_DF.csv --index-column date`

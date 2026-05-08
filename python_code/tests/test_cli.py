@@ -173,3 +173,40 @@ def test_search_command_updates_timestamped_fitting_plot(tmp_path, monkeypatch, 
         "sample=1 snapshot=acceptance_snapshot_20260502T120000000000.json "
         "fitting_plot=fitting_DF_DHF_20260502T120000000000.png"
     )
+
+
+def test_interactive_plot_command_delegates_to_streamlit_launcher(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_launch(csv_path=None, index_column=None, host="127.0.0.1", port=8501):
+        captured["csv_path"] = Path(csv_path) if csv_path is not None else None
+        captured["index_column"] = index_column
+        captured["host"] = host
+        captured["port"] = port
+        return 0
+
+    monkeypatch.setattr(cli_module, "launch_interactive_plot_app", fake_launch)
+    csv_path = tmp_path / "series.csv"
+    csv_path.write_text("timestamp,value\n2020-01-01,1\n", encoding="utf-8")
+
+    exit_code = run_cli(
+        [
+            "interactive-plot",
+            "--csv",
+            str(csv_path),
+            "--index-column",
+            "timestamp",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8510",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "csv_path": csv_path,
+        "index_column": "timestamp",
+        "host": "0.0.0.0",
+        "port": 8510,
+    }

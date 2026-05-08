@@ -12,10 +12,12 @@ import numpy as np
 try:
     from .data_assets import copy_reference_dataset
     from .data_processing import DataProcessing
+    from .interactive_plot import launch_interactive_plot_app
     from .stochastic_search import StochasticSearch
 except ImportError:
     from data_assets import copy_reference_dataset
     from data_processing import DataProcessing
+    from interactive_plot import launch_interactive_plot_app
     from stochastic_search import StochasticSearch
 
 
@@ -92,6 +94,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
     search.add_argument("--bound-error-fhd", type=float, default=25.0)
     search.set_defaults(func=run_search_command)
 
+    interactive_plot = subparsers.add_parser(
+        "interactive-plot",
+        help="Launch a Streamlit frontend for interactive time-series plotting.",
+    )
+    interactive_plot.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="Optional CSV file to pre-load in the frontend.",
+    )
+    interactive_plot.add_argument(
+        "--index-column",
+        type=str,
+        default=None,
+        help="Optional timestamp column name. If omitted, the app uses the dataframe index.",
+    )
+    interactive_plot.add_argument("--host", type=str, default="127.0.0.1")
+    interactive_plot.add_argument("--port", type=int, default=8501)
+    interactive_plot.set_defaults(func=run_interactive_plot_command)
+
     return parser
 
 
@@ -136,6 +158,17 @@ def run_prepare_data_command(args) -> int:
     print(f"output_dir={output_dir}")
     print(f"copied_files={len(copied_files)}")
     return 0
+
+
+def run_interactive_plot_command(args) -> int:
+    """Launch the Streamlit-based interactive plotting frontend."""
+    return launch_interactive_plot_app(
+        csv_path=args.csv,
+        index_column=args.index_column,
+        host=args.host,
+        port=args.port,
+    )
+
 
 def render_search_progress(sample_number: int, sample_count: int, width: int = 40) -> None:
     """Render the in-place stochastic search progress bar."""

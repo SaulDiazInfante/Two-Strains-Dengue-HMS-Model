@@ -40,7 +40,7 @@ def test_frequency_tables_command_writes_output(sample_data_dir, capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "generated=" in captured.out
+    assert "generated:" in captured.out
 
 
 def test_prepare_data_command_copies_reference_files(tmp_path, monkeypatch, capsys):
@@ -116,6 +116,9 @@ def test_search_command_updates_timestamped_fitting_plot(tmp_path, monkeypatch, 
             self.figure_ids.append(id(figure))
             return figure
 
+        def create_reference_parameter_fitting_plot(self, figure=None):
+            return self.create_fitting_plot(figure=figure)
+
         def save_solution_plots(self):
             (self.plots_dir / "populations_grid.png").write_text("plot", encoding="utf-8")
             return None
@@ -168,11 +171,139 @@ def test_search_command_updates_timestamped_fitting_plot(tmp_path, monkeypatch, 
     assert "acceptance_snapshot=" in captured.out
     assert fit_file.exists()
     assert acceptance_snapshot.exists()
-    assert len(set(FakeSearch.figure_ids)) == 1
+    assert len(set(FakeSearch.figure_ids)) == 2
+    assert len(set(FakeSearch.figure_ids[1:])) == 1
     assert accepted_log.read_text(encoding="utf-8").strip() == (
         "sample=1 snapshot=acceptance_snapshot_20260502T120000000000.json "
         "fitting_plot=fitting_DF_DHF_20260502T120000000000.png"
     )
+
+
+def test_search_command_run_all_saves_only_best_sample(tmp_path, monkeypatch, capsys):
+    class FakeSearch:
+        sampled_indices = []
+        saved_snapshots = []
+
+        def __init__(self, data_dir=None, runtime_dir=None):
+            self.data_dir = Path(data_dir) if data_dir is not None else None
+            self.runtime_dir = Path(runtime_dir)
+            self.plots_dir = self.runtime_dir / "plots"
+            self.plots_dir.mkdir(parents=True, exist_ok=True)
+            self.output_dir = self.runtime_dir / "parameters"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.sample_count = 0
+            self.df_error_threshold = 100.0
+            self.dhf_error_threshold = 25.0
+            self.peak_df_cases = 0.0
+            self.current_sample = -1
+            self.r_01 = 0.0
+            self.r_02 = 0.0
+            self.r_zero = 0.0
+
+        def build_weekly_frequency_tables(self):
+            return None
+
+        def sample_model_parameters(self, flag_deterministic=False):
+            self.current_sample += 1
+            self.sampled_indices.append(self.current_sample)
+            return None
+
+        def solve_ode_system(self):
+            return None
+
+        def compute_fitting_errors(self):
+            values = {
+                0: (40.0, 20.0, 150.0),
+                1: (11.0, 7.0, 123.0),
+                2: (5.0, 6.0, 111.0),
+            }
+            self.df_fit_error, self.dhf_fit_error, self.peak_df_cases = values[self.current_sample]
+
+        def compute_basic_reproduction_numbers(self):
+            self.r_01 = 1.21
+            self.r_02 = 1.44
+            self.r_zero = 1.3
+            return 1.1, 1.2, 1.3
+
+        def evaluate_search_acceptance(self):
+            return self.current_sample in {1, 2}
+
+        def create_fitting_plot(self, figure=None):
+            if figure is None:
+                figure = plt.figure()
+            else:
+                figure.clear()
+            axis = figure.add_subplot(111)
+            axis.plot([0.0, 1.0], [0.0, float(self.current_sample)])
+            return figure
+
+        def create_reference_parameter_fitting_plot(self, figure=None):
+            return self.create_fitting_plot(figure=figure)
+
+        def save_solution_plots(self):
+            (self.plots_dir / "populations_grid.png").write_text(
+                f"sample={self.current_sample}",
+                encoding="utf-8",
+            )
+            return None
+
+        def save_acceptance_snapshot(
+            self,
+            sample_index=None,
+            snapshot_timestamp=None,
+            fitting_plot_file=None,
+            populations_plot_file=None,
+        ):
+            snapshot_path = self.output_dir / f"acceptance_snapshot_{snapshot_timestamp}.json"
+            snapshot_path.write_text(
+                (
+                    f"sample={sample_index}\n"
+                    f"current_sample={self.current_sample}\n"
+                    f"fitting_plot={Path(fitting_plot_file).name}\n"
+                    f"populations_plot={Path(populations_plot_file).name}\n"
+                ),
+                encoding="utf-8",
+            )
+            self.saved_snapshots.append(snapshot_path)
+            return snapshot_path
+
+        def save_input_data_plot(self):
+            return None
+
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(cli_module, "StochasticSearch", FakeSearch)
+    monkeypatch.setattr(cli_module, "build_timestamp_string", lambda: "20260502T120000000000")
+    monkeypatch.setattr(cli_module.plt, "show", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_module.plt, "pause", lambda *args, **kwargs: None)
+
+    exit_code = run_cli(
+        [
+            "search",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--runtime-dir",
+            str(runtime_dir),
+            "--samples",
+            "3",
+            "--run-all",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    best_log = runtime_dir / "best_sample.txt"
+    acceptance_snapshot = runtime_dir / "parameters" / "acceptance_snapshot_20260502T120000000000.json"
+    accepted_log = runtime_dir / "accepted_samples.txt"
+    assert exit_code == 0
+    assert FakeSearch.sampled_indices == [0, 1, 2]
+    assert "best_sample=2" in captured.out
+    assert "best_sample_accepted=True" in captured.out
+    assert acceptance_snapshot.exists()
+    assert "sample=2" in acceptance_snapshot.read_text(encoding="utf-8")
+    assert "current_sample=2" in acceptance_snapshot.read_text(encoding="utf-8")
+    assert best_log.read_text(encoding="utf-8").startswith(
+        "sample=2 accepted=True snapshot=acceptance_snapshot_20260502T120000000000.json"
+    )
+    assert not accepted_log.exists()
 
 
 def test_interactive_plot_command_delegates_to_streamlit_launcher(tmp_path, monkeypatch):

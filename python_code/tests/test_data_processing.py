@@ -49,6 +49,11 @@ def _build_expected_daily_counts(data_dir, fever):
         name="date",
     )
     expected = expected.reindex(full_date_index, fill_value=0)
+    expected = DataProcessing.add_moving_average_column(
+        expected,
+        window_size=DataProcessing.DAILY_MOVING_AVERAGE_WINDOW_DAYS,
+        output_column=DataProcessing.DAILY_MOVING_AVERAGE_COLUMN,
+    )
     return expected
 
 
@@ -71,6 +76,11 @@ def _build_expected_weekly_counts(data_dir, fever):
     )
     expected["week"] = pd.to_datetime(expected["week"]).dt.normalize()
     expected["count"] = expected["count"].astype(int)
+    expected = DataProcessing.add_moving_average_column(
+        expected,
+        window_size=DataProcessing.WEEKLY_MOVING_AVERAGE_WINDOW_WEEKS,
+        output_column=DataProcessing.WEEKLY_MOVING_AVERAGE_COLUMN,
+    )
     return expected
 
 

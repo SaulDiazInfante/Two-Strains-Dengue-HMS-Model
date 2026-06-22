@@ -321,13 +321,15 @@ def test_comparison_frames_split_plot_and_error_intervals(tmp_path, sample_data_
     df_plot_frame, dhf_plot_frame = sim._build_plot_comparison_frames()
 
     expected_plot_start_date = pd.Timestamp(datetime.date.fromisocalendar(2010, 25, 1))
-    expected_error_start_date = pd.Timestamp(datetime.date.fromisocalendar(2010, 27, 1))
+    expected_error_start_date = pd.Timestamp(datetime.date.fromisocalendar(2010, 37, 1))
     assert df_plot_frame["time_week"].iloc[0] == pytest.approx(time_weeks[0])
     assert dhf_plot_frame["time_week"].iloc[0] == pytest.approx(time_weeks[0])
     assert df_plot_frame.index[0] == expected_plot_start_date
     assert dhf_plot_frame.index[0] == expected_plot_start_date
     assert df_error_frame["time_week"].iloc[0] == pytest.approx(sim.FITTING_ERROR_START_WEEK)
     assert dhf_error_frame["time_week"].iloc[0] == pytest.approx(sim.FITTING_ERROR_START_WEEK)
+    assert df_error_frame.index[0].strftime("%Y-%m-%d") == "2010-09-13"
+    assert dhf_error_frame.index[0].strftime("%Y-%m-%d") == "2010-09-13"
     assert df_error_frame.index[0] == expected_error_start_date
     assert dhf_error_frame.index[0] == expected_error_start_date
     assert len(df_error_frame.index) == sim.FITTING_WINDOW_WEEKS * sim.DAYS_PER_WEEK
@@ -380,6 +382,41 @@ def test_save_sampled_solution_time_series_uses_daily_time_scale(tmp_path, sampl
     assert sampled.loc[7, "Y_m1_h"] == pytest.approx(7.0)
 
 
+def test_save_fitting_scale_solution_writes_plot_ready_csv(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    grid_size = int(sim.T - sim.t0) * 10000
+    sim.t = np.linspace(sim.t0, sim.T, grid_size)
+    solution_values = np.ones((grid_size, len(sim.ODE_STATE_COLUMNS)), dtype=np.float64)
+    solution_values[:, sim.ODE_STATE_COLUMNS.index("z")] = np.linspace(0.0, 140.0, grid_size)
+    solution_values[:, sim.ODE_STATE_COLUMNS.index("Y_m1_h")] = np.linspace(10.0, 80.0, grid_size)
+    sim.solution = sim._build_solution_frame(sim.t, solution_values)
+
+    output_path = sim.save_fitting_scale_solution(
+        sim.output_dir / "solution_fitting_scale.csv"
+    )
+
+    fitting_scale = pd.read_csv(output_path)
+    assert list(fitting_scale.columns) == [
+        "frequency",
+        "outcome",
+        "date",
+        "time_week",
+        "observed_count",
+        "simulated_count",
+        "observed_moving_average",
+        "simulated_moving_average",
+        "moving_average_window",
+    ]
+    assert set(fitting_scale["frequency"]) == {"daily", "weekly"}
+    assert set(fitting_scale["outcome"]) == {"DF", "DHF"}
+    daily = fitting_scale[fitting_scale["frequency"] == "daily"]
+    weekly = fitting_scale[fitting_scale["frequency"] == "weekly"]
+    assert set(daily["moving_average_window"]) == {sim.MOVING_AVERAGE_WINDOW_DAYS}
+    assert set(weekly["moving_average_window"]) == {sim.WEEKLY_MOVING_AVERAGE_WINDOW_WEEKS}
+    assert daily["date"].min() == "2010-07-05"
+    assert daily["simulated_count"].notna().all()
+
+
 def test_save_acceptance_snapshot_writes_reproducible_artifacts(tmp_path, sample_data_dir):
     sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
     sim.grid_size = 250
@@ -400,11 +437,23 @@ def test_save_acceptance_snapshot_writes_reproducible_artifacts(tmp_path, sample
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     parameter_path = sim.runtime_dir / snapshot["artifacts"]["parameter_snapshot"]
     solution_path = sim.runtime_dir / snapshot["artifacts"]["solution_snapshot"]
+    fitting_scale_solution_path = sim.runtime_dir / snapshot["artifacts"]["fitting_scale_solution"]
     solution_time_series_path = sim.runtime_dir / snapshot["artifacts"]["solution_time_series"]
     assert snapshot["sample_index"] == 3
+    assert snapshot["acceptance_thresholds"]["fitting_window_weeks"] == 10
+    assert snapshot["acceptance_thresholds"]["df_fitting_start_index"] == 10
+    assert snapshot["acceptance_thresholds"]["dhf_fitting_start_index"] == 6
+    assert snapshot["acceptance_thresholds"]["fitting_start_week"] == pytest.approx(37.0)
+    assert snapshot["acceptance_thresholds"]["fitting_end_week"] == pytest.approx(47.0)
+    assert snapshot["acceptance_thresholds"]["fitting_start_date"] == "2010-09-13"
     assert parameter_path.exists()
     assert solution_path.exists()
+    assert fitting_scale_solution_path.exists()
     assert solution_time_series_path.exists()
+    raw_solution = pd.read_csv(solution_path)
+    assert list(raw_solution.columns) == list(sim.ODE_SOLUTION_COLUMNS)
+    fitting_scale_solution = pd.read_csv(fitting_scale_solution_path)
+    assert {"daily", "weekly"}.issubset(set(fitting_scale_solution["frequency"]))
 
     reloaded = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "reloaded")
     reloaded.load_parameters_from_json(parameter_path)
@@ -484,7 +533,7 @@ def test_compute_ode_rhs():
         'n_host_m1': n_host_m1
     }
 
-    state = np.concatenate((state_vector, state_host, state_host_m1), dtype=float)
+    state = np.concatenate((state_vector, state_host, state_host_m1, [0.0]), dtype=float)
     derivatives = StochasticSearch.compute_ode_rhs(state, 0.0, **params)
 
     vector_conservation_law = np.sum(derivatives[0:3])
@@ -493,3 +542,4 @@ def test_compute_ode_rhs():
     assert abs(vector_conservation_law) < 1e-8
     assert abs(host_conservation_law) < 1e-8
     assert abs(host_m1_conservation_law) < 1e-8
+    assert np.isfinite(derivatives[-1])

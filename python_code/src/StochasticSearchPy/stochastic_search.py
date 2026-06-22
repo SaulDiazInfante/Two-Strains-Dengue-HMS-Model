@@ -199,7 +199,9 @@ class StochasticSearch(data_processing.DataProcessing):
         "hspace": 0.34,
     }
     DAYS_PER_WEEK = 7
-    FITTING_ERROR_START_WEEK = 27.0
+    DF_FITTING_START_INDEX = 10
+    DHF_FITTING_START_INDEX = 6
+    FITTING_ERROR_START_WEEK = 37.0
     FITTING_ERROR_END_WEEK = 47.0
     PLOT_END_WEEK = 53.0
     FITTING_WINDOW_WEEKS = int(FITTING_ERROR_END_WEEK - FITTING_ERROR_START_WEEK)
@@ -1189,10 +1191,11 @@ class StochasticSearch(data_processing.DataProcessing):
         self.N_S = self.S_0 + self.I_10 + self.I_20 + self.R_s0
         self.N_S_m1 = self.S_m1_0 + self.Y_m1_c0 + self.Y_m1_h0 + self.R_s_m1_0
         # Backward-compatible aliases retained for legacy call sites.
-        self.N_H = self.N_S + self.N_S_m1
-        # self.Lambda_S = self.mu_H * self.N_S
-        # self.Lambda_S_m1 = self.mu_H * self.N_S_m1
-        #self.Lambda_M = self.mu_M * (self.M_s0 + self.M_10 + self.M_20)
+        self.N_H = self.N_S
+        self.N_sm1 = self.N_S_m1
+        self.Lambda_S = self.mu_H * self.N_S
+        self.Lambda_S_m1 = self.mu_H * self.N_S_m1
+        self.Lambda_M = self.mu_M * (self.M_s0 + self.M_10 + self.M_20)
         self.z0 = self.p * (self.I_10 + self.I_20 + self.Y_m1_c0)
 
     def sample_model_parameters(self, flag_deterministic=False):
@@ -1361,6 +1364,85 @@ class StochasticSearch(data_processing.DataProcessing):
         self.solution.to_csv(output_path, index=False)
         return output_path
 
+    def build_fitting_scale_solution_frame(self) -> pd.DataFrame:
+        """Return solution-derived fitting data on the same scale used by plots."""
+        df_plot_frame, dhf_plot_frame = self._build_plot_comparison_frames()
+        weekly_df_plot_frame = self._build_weekly_fitting_frame(df_plot_frame)
+        weekly_dhf_plot_frame = self._build_weekly_fitting_frame(dhf_plot_frame)
+
+        def build_daily_records(frame: pd.DataFrame, outcome: str) -> pd.DataFrame:
+            records = frame.reset_index().rename(
+                columns={
+                    "date": "date",
+                    "observed_daily": "observed_count",
+                    "simulated_daily": "simulated_count",
+                    "observed_moving_average": "observed_moving_average",
+                    "simulated_moving_average": "simulated_moving_average",
+                }
+            )
+            records.insert(0, "outcome", outcome)
+            records.insert(0, "frequency", "daily")
+            records["moving_average_window"] = self.MOVING_AVERAGE_WINDOW_DAYS
+            return records[
+                [
+                    "frequency",
+                    "outcome",
+                    "date",
+                    "time_week",
+                    "observed_count",
+                    "simulated_count",
+                    "observed_moving_average",
+                    "simulated_moving_average",
+                    "moving_average_window",
+                ]
+            ]
+
+        def build_weekly_records(frame: pd.DataFrame, outcome: str) -> pd.DataFrame:
+            records = frame.rename(
+                columns={
+                    "week": "date",
+                    "observed_weekly": "observed_count",
+                    "simulated_weekly": "simulated_count",
+                    "observed_weekly_moving_average": "observed_moving_average",
+                    "simulated_weekly_moving_average": "simulated_moving_average",
+                }
+            ).copy()
+            records.insert(0, "outcome", outcome)
+            records.insert(0, "frequency", "weekly")
+            records["moving_average_window"] = self.WEEKLY_MOVING_AVERAGE_WINDOW_WEEKS
+            return records[
+                [
+                    "frequency",
+                    "outcome",
+                    "date",
+                    "time_week",
+                    "observed_count",
+                    "simulated_count",
+                    "observed_moving_average",
+                    "simulated_moving_average",
+                    "moving_average_window",
+                ]
+            ]
+
+        fitting_scale_frame = pd.concat(
+            [
+                build_daily_records(df_plot_frame, "DF"),
+                build_daily_records(dhf_plot_frame, "DHF"),
+                build_weekly_records(weekly_df_plot_frame, "DF"),
+                build_weekly_records(weekly_dhf_plot_frame, "DHF"),
+            ],
+            ignore_index=True,
+        )
+        fitting_scale_frame["date"] = pd.to_datetime(fitting_scale_frame["date"]).dt.strftime("%Y-%m-%d")
+        return fitting_scale_frame
+
+    def save_fitting_scale_solution(self, file_path) -> Path:
+        """Persist the plot-scale fitting data for the current solution as CSV."""
+        output_path = Path(file_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.build_fitting_scale_solution_frame().to_csv(output_path, index=False)
+        return output_path
+
     def build_sampled_solution_time_series(self, sample_interval_days: int = 1) -> pd.DataFrame:
         """Return the current ODE solution sampled onto a day-based time axis.
 
@@ -1445,6 +1527,7 @@ class StochasticSearch(data_processing.DataProcessing):
         snapshot_timestamp=None,
         parameter_file=None,
         solution_file=None,
+        fitting_scale_solution_file=None,
         solution_time_series_file=None,
         fitting_plot_file=None,
         populations_plot_file=None,
@@ -1485,8 +1568,8 @@ class StochasticSearch(data_processing.DataProcessing):
                 "peak_df_cases_max": float(self.PEAK_DF_CASES_THRESHOLD),
                 "fitting_window_weeks": int(self.FITTING_WINDOW_WEEKS),
                 "moving_average_window_days": int(self.MOVING_AVERAGE_WINDOW_DAYS),
-                "df_fitting_start_index": None,
-                "dhf_fitting_start_index": None,
+                "df_fitting_start_index": int(self.DF_FITTING_START_INDEX),
+                "dhf_fitting_start_index": int(self.DHF_FITTING_START_INDEX),
                 "df_fitting_start_week": float(fitting_start_time_week),
                 "dhf_fitting_start_week": float(fitting_start_time_week),
                 "fitting_start_week": float(fitting_start_time_week),
@@ -1511,6 +1594,7 @@ class StochasticSearch(data_processing.DataProcessing):
             "artifacts": {
                 "parameter_snapshot": normalize_path(parameter_file),
                 "solution_snapshot": normalize_path(solution_file),
+                "fitting_scale_solution": normalize_path(fitting_scale_solution_file),
                 "solution_time_series": normalize_path(solution_time_series_file),
                 "fitting_plot": normalize_path(fitting_plot_file),
                 "populations_plot": normalize_path(populations_plot_file),
@@ -1525,6 +1609,7 @@ class StochasticSearch(data_processing.DataProcessing):
         snapshot_timestamp=None,
         parameter_file=None,
         solution_file=None,
+        fitting_scale_solution_file=None,
         solution_time_series_file=None,
         fitting_plot_file=None,
         populations_plot_file=None,
@@ -1541,6 +1626,11 @@ class StochasticSearch(data_processing.DataProcessing):
             if solution_file is not None
             else self.output_dir / f"solution_{timestamp}.csv"
         )
+        fitting_scale_solution_path = (
+            Path(fitting_scale_solution_file)
+            if fitting_scale_solution_file is not None
+            else self.output_dir / f"solution_fitting_scale_{timestamp}.csv"
+        )
         solution_time_series_path = (
             Path(solution_time_series_file)
             if solution_time_series_file is not None
@@ -1548,6 +1638,7 @@ class StochasticSearch(data_processing.DataProcessing):
         )
         self.save_parameter_snapshot(file_path=parameter_path)
         self.save_solution_snapshot(solution_path)
+        self.save_fitting_scale_solution(fitting_scale_solution_path)
         self.save_sampled_solution_time_series(file_path=solution_time_series_path)
         snapshot_path = self.output_dir / f"acceptance_snapshot_{timestamp}.json"
         snapshot = self._build_acceptance_snapshot_dict(
@@ -1555,6 +1646,7 @@ class StochasticSearch(data_processing.DataProcessing):
             snapshot_timestamp=timestamp,
             parameter_file=parameter_path,
             solution_file=solution_path,
+            fitting_scale_solution_file=fitting_scale_solution_path,
             solution_time_series_file=solution_time_series_path,
             fitting_plot_file=fitting_plot_file,
             populations_plot_file=populations_plot_file,

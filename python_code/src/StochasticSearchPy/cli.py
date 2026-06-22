@@ -92,6 +92,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     search.add_argument("--samples", type=int, default=1)
     search.add_argument("--bound-error-fd", type=float, default=300.0)
     search.add_argument("--bound-error-fhd", type=float, default=25.0)
+    search.add_argument(
+        "--run-all",
+        action="store_true",
+        help="Evaluate every requested sample and save only the best sample at the end.",
+    )
     search.set_defaults(func=run_search_command)
 
     interactive_plot = subparsers.add_parser(
@@ -202,6 +207,66 @@ def render_search_progress(sample_number: int, sample_count: int, width: int = 4
     sys.stdout.flush()
 
 
+def rank_search_sample(sim, accepted: bool) -> tuple[float, float, float, float, float]:
+    """Return a sortable rank where lower values identify a better sample."""
+    machine_eps = np.finfo(np.float64).eps
+    df_threshold = max(float(sim.df_error_threshold), machine_eps)
+    dhf_threshold = max(float(sim.dhf_error_threshold), machine_eps)
+    r_zero_threshold = float(getattr(sim, "R_ZERO_ACCEPTANCE_THRESHOLD", 1.0))
+    peak_threshold = max(float(getattr(sim, "PEAK_DF_CASES_THRESHOLD", np.inf)), machine_eps)
+    normalized_error = max(
+        float(sim.df_fit_error) / df_threshold,
+        float(sim.dhf_fit_error) / dhf_threshold,
+    )
+    r_zero_shortfall = max(0.0, r_zero_threshold - float(getattr(sim, "r_zero", 0.0)))
+    peak_excess = max(0.0, float(sim.peak_df_cases) - peak_threshold) / peak_threshold
+    return (
+        0.0 if accepted else 1.0,
+        normalized_error,
+        r_zero_shortfall,
+        peak_excess,
+        float(sim.df_fit_error) + float(sim.dhf_fit_error),
+    )
+
+
+def capture_search_state(sim, sample_index: int, accepted: bool, rank: tuple) -> dict:
+    """Capture enough model state to restore and save a selected sample later."""
+    scalar_types = (int, float, bool, np.integer, np.floating, np.bool_)
+    scalar_state = {}
+    for key, value in sim.__dict__.items():
+        if isinstance(value, scalar_types):
+            scalar_state[key] = value.item() if hasattr(value, "item") else value
+
+    state = {
+        "sample_index": int(sample_index),
+        "accepted": bool(accepted),
+        "rank": tuple(rank),
+        "scalars": scalar_state,
+    }
+    solution = getattr(sim, "solution", None)
+    if solution is not None and hasattr(solution, "copy"):
+        state["solution"] = solution.copy(deep=True)
+    t_values = getattr(sim, "t", None)
+    if t_values is not None:
+        state["t"] = np.asarray(t_values, dtype=np.float64).copy()
+    return state
+
+
+def restore_search_state(sim, state: dict) -> None:
+    """Restore a captured model state before writing best-sample artifacts."""
+    for key, value in state.get("scalars", {}).items():
+        setattr(sim, key, value)
+    if "solution" in state:
+        sim.solution = state["solution"].copy(deep=True)
+        if hasattr(sim, "TIME_GRID_COLUMN") and sim.TIME_GRID_COLUMN in sim.solution:
+            sim.t = sim.solution[sim.TIME_GRID_COLUMN].to_numpy(dtype=np.float64)
+            sim.grid_size = len(sim.solution.index)
+            if sim.grid_size > 1:
+                sim.h = np.float64(sim.t[1] - sim.t[0])
+    elif "t" in state:
+        sim.t = state["t"].copy()
+
+
 def run_search_command(args) -> int:
     """Execute the stochastic search workflow and persist generated artifacts."""
     sim = StochasticSearch(data_dir=args.data_dir, runtime_dir=args.runtime_dir)
@@ -225,7 +290,11 @@ def run_search_command(args) -> int:
 
     accepted_index = None
     acceptance_snapshot_file = None
+    run_all = bool(args.run_all)
+    best_state = None
+    best_rank = None
     accepted_log = sim.runtime_dir / "accepted_samples.txt"
+    best_log = sim.runtime_dir / "best_sample.txt"
     accepted_header = (
         "i       R_01        R_02        R_zero      error_DF    error_DHF   peak_DF     \n"
         "================================================================================"
@@ -238,15 +307,18 @@ def run_search_command(args) -> int:
         sim.sample_model_parameters(flag_deterministic=False)
         sim.solve_ode_system()
         sim.compute_fitting_errors()
-        live_fitting_figure = update_fitting_progress_figure(
-            sim,
-            fit_file=fit_file,
-            previous_figure=live_fitting_figure,
-        )
+        if not run_all:
+            live_fitting_figure = update_fitting_progress_figure(
+                sim,
+                fit_file=fit_file,
+                previous_figure=live_fitting_figure,
+            )
         error_df = sim.df_fit_error
         error_dhf = sim.dhf_fit_error
         r01_per_week, r02_per_week, r0_per_week = sim.compute_basic_reproduction_numbers()
+        sim.r_zero = r0_per_week
         stop = sim.evaluate_search_acceptance()
+        sample_rank = rank_search_sample(sim, accepted=stop)
 
         samples["i"].append(i)
         samples["r01"].append(r01_per_week)
@@ -258,8 +330,19 @@ def run_search_command(args) -> int:
         samples["accepted"].append(stop)
         render_search_progress(int(i) + 1, sim.sample_count)
 
+        if best_rank is None or sample_rank < best_rank:
+            best_rank = sample_rank
+            best_state = capture_search_state(
+                sim,
+                sample_index=int(i),
+                accepted=stop,
+                rank=sample_rank,
+            )
+
         if stop and accepted_index is None:
             accepted_index = i
+
+        if stop and not run_all:
             sim.save_solution_plots()
             acceptance_timestamp = build_timestamp_string()
             pop_file = sim.plots_dir / f"populations_grid_{acceptance_timestamp}.png"
@@ -295,20 +378,64 @@ def run_search_command(args) -> int:
     else:
         sys.stdout.write("\n")
 
+    if run_all and best_state is not None:
+        restore_search_state(sim, best_state)
+        best_index = int(best_state["sample_index"])
+        best_accepted = bool(best_state["accepted"])
+        sim.save_solution_plots()
+        acceptance_timestamp = build_timestamp_string()
+        best_fit_file = sim.plots_dir / f"fitting_DF_DHF_best_{acceptance_timestamp}.png"
+        best_figure = sim.create_fitting_plot()
+        best_figure.savefig(sim.plots_dir / "fitting_DF_DHF.png")
+        best_figure.savefig(best_fit_file)
+        plt.close(best_figure)
+        pop_file = sim.plots_dir / f"populations_grid_{acceptance_timestamp}.png"
+        shutil.copy2(sim.plots_dir / "populations_grid.png", pop_file)
+        acceptance_snapshot_file = sim.save_acceptance_snapshot(
+            sample_index=best_index,
+            snapshot_timestamp=acceptance_timestamp,
+            fitting_plot_file=best_fit_file,
+            populations_plot_file=pop_file,
+        )
+        with best_log.open("w", encoding="utf-8") as logf:
+            logf.write(
+                f"sample={best_index} accepted={best_accepted} "
+                f"snapshot={acceptance_snapshot_file.name} "
+                f"fitting_plot={best_fit_file.name}\n"
+            )
+        print(accepted_header)
+        print(
+            "%-8d%-12f%-12f%-12f%-12f%-12f%-12f"
+            % (
+                best_index,
+                np.sqrt(float(getattr(sim, "r_01", 0.0))),
+                np.sqrt(float(getattr(sim, "r_02", 0.0))),
+                float(getattr(sim, "r_zero", 0.0)),
+                sim.df_fit_error,
+                sim.dhf_fit_error,
+                sim.peak_df_cases,
+            )
+        )
+        print(f"best_sample={best_index}")
+        print(f"best_sample_accepted={best_accepted}")
+        print(f"best_score={best_state['rank']}")
+        print(f"acceptance_snapshot={acceptance_snapshot_file}")
+
     plt.figure(figsize=(7, 5))
     plt.scatter(samples["err_df"], samples["r0"], s=10, alpha=0.4, label="Samples")
-    if accepted_index is not None:
-        idx = samples["i"].index(accepted_index)
+    highlighted_index = best_state["sample_index"] if run_all and best_state is not None else accepted_index
+    if highlighted_index is not None:
+        idx = samples["i"].index(highlighted_index)
         plt.scatter(
             [samples["err_df"][idx]],
             [samples["r0"][idx]],
             color="red",
             s=60,
-            label="Accepted",
+            label="Best" if run_all else "Accepted",
         )
     plt.xlabel("Error DF")
     plt.ylabel("R0")
-    plt.title("Search progress until acceptance")
+    plt.title("Search progress across all samples" if run_all else "Search progress until acceptance")
     plt.legend()
     plt.tight_layout()
     plt.savefig(sim.plots_dir / "accepted_samples.png")

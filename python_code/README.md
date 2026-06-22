@@ -92,6 +92,12 @@ Run the stochastic search:
 two-strains-dengue search --data-dir ./artifacts/data --runtime-dir ./artifacts --samples 1
 ```
 
+Run all requested stochastic-search samples and save only the best sample:
+
+```bash
+two-strains-dengue search --data-dir ./artifacts/data --runtime-dir ./artifacts/search_1000 --samples 1000 --run-all
+```
+
 Launch the interactive plotting frontend:
 
 ```bash

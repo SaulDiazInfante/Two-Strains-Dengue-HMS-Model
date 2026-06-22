@@ -64,3 +64,21 @@ The package installs the `two-strains-dengue` command.
 - `two-strains-dengue search --data-dir ./artifacts/data --runtime-dir ./artifacts --samples 1`
 - `two-strains-dengue search --data-dir ./artifacts/data --runtime-dir ./artifacts/search_1000 --samples 1000 --run-all`
 - `two-strains-dengue interactive-plot --csv ./artifacts/data/frequency_per_date_DF.csv --index-column date`
+
+## Example: Sampling 10000 solution paths and keep the best
+After downloading the github repo, install locally:
+
+```{bash}
+python -m pip install -e .
+```
+
+
+Then use:
+
+  python -m StochasticSearchPy.cli search \
+    --data-dir data/reference/raw_data \
+    --runtime-dir artifacts/search_1000 \
+    --samples 1000 \
+    --run-all
+
+The data output and other artifacts will be in `artifacts/search_1000/solution_paths.csv`.

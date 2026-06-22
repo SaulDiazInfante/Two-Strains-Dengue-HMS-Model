@@ -5,6 +5,7 @@
     <option name="INTERPRETER_OPTIONS" value="" />
     <option name="PARENT_ENVS" value="true" />
     <envs>
+      <env name="MPLBACKEND" value="Agg" />
       <env name="PYTHONPATH" value="$PROJECT_DIR$/python_code/src" />
     </envs>
     <option name="SDK_HOME" value="" />

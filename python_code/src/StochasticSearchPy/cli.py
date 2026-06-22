@@ -66,7 +66,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     tables = subparsers.add_parser(
         "frequency-tables",
-        help="Generate weekly DF and DHF frequency tables from incidence CSVs.",
+        help="Generate daily and weekly DF/DHF frequency tables from incidence CSVs.",
     )
     tables.add_argument("--data-dir", type=Path, default=None)
     tables.set_defaults(func=run_frequency_tables_command)
@@ -134,17 +134,29 @@ def run_smoke_command(args) -> int:
 
 
 def run_frequency_tables_command(args) -> int:
-    """Generate weekly DF and DHF frequency tables from incidence CSV files."""
+    """Generate daily and weekly DF/DHF frequency tables from incidence CSV files."""
     with DataProcessing(data_dir=args.data_dir) as processor:
-        freq_df, freq_dhf = processor.build_weekly_frequency_tables()
+        weekly_df, weekly_dhf = processor.build_weekly_frequency_tables()
+        daily_df = processor.daily_df_frequency_table
+        daily_dhf = processor.daily_dhf_frequency_table
         data_dir = processor.data_dir
+    generated_files = (
+        data_dir / "frequency_per_date_DF.csv",
+        data_dir / "frequency_per_date_DHF.csv",
+        data_dir / "frequency_per_week_DF.csv",
+        data_dir / "frequency_per_week_DHF.csv",
+    )
+    print("generated:")
+    for file_path in generated_files:
+        print(file_path)
     print(
-        "generated={} and {}".format(
-            data_dir / "frequency_per_week_DF.csv",
-            data_dir / "frequency_per_week_DHF.csv",
+        "daily_rows_df={} daily_rows_dhf={} weekly_rows_df={} weekly_rows_dhf={}".format(
+            len(daily_df),
+            len(daily_dhf),
+            len(weekly_df),
+            len(weekly_dhf),
         )
     )
-    print(f"df_rows={len(freq_df)} dhf_rows={len(freq_dhf)}")
     return 0
 
 
@@ -218,7 +230,9 @@ def run_search_command(args) -> int:
         "i       R_01        R_02        R_zero      error_DF    error_DHF   peak_DF     \n"
         "================================================================================"
     )
-
+    fig = sim.create_reference_parameter_fitting_plot()
+    fig.savefig(sim.plots_dir / "reference_parameter_fitting.png")
+    plt.show()
     for i in np.arange(sim.sample_count):
         render_search_progress(int(i), sim.sample_count)
         sim.sample_model_parameters(flag_deterministic=False)

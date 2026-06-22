@@ -26,6 +26,11 @@ class DataProcessing:
         checkout.
     """
 
+    DAILY_MOVING_AVERAGE_WINDOW_DAYS = 7
+    WEEKLY_MOVING_AVERAGE_WINDOW_WEEKS = 3
+    DAILY_MOVING_AVERAGE_COLUMN = "moving_average_7_days"
+    WEEKLY_MOVING_AVERAGE_COLUMN = "moving_average_3_weeks"
+
     def __init__(self, data_dir=None):
         self.df_incidence_rows = []
         self.dhf_incidence_rows = []
@@ -33,8 +38,8 @@ class DataProcessing:
         self.daily_dhf_frequency_table = pd.DataFrame()
         self.weekly_df_frequency_table = pd.DataFrame()
         self.weekly_dhf_frequency_table = pd.DataFrame()
-        self.weekly_df_frequency_array = np.empty((0, 2), dtype=int)
-        self.weekly_dhf_frequency_array = np.empty((0, 2), dtype=int)
+        self.weekly_df_frequency_array = np.empty((0, 2), dtype=object)
+        self.weekly_dhf_frequency_array = np.empty((0, 2), dtype=object)
         self.base_dir = Path(__file__).resolve().parent
         self.data_dir = resolve_data_directory(data_dir, create=data_dir is not None)
         setup_script = self.data_dir / "setup.sh"
@@ -361,80 +366,158 @@ class DataProcessing:
     @staticmethod
     def compute_moving_average(
         values: pd.Series | pd.DataFrame,
-        window_days: int,
+        window_size: int,
+        min_periods: int | None = None,
     ) -> pd.Series:
-        """Return a trailing moving average over daily counts."""
+        """Return a trailing moving average over the provided count series."""
         if isinstance(values, pd.DataFrame):
             if "count" not in values.columns:
-                raise KeyError("Daily count dataframe must contain a 'count' column.")
+                raise KeyError("Count dataframe must contain a 'count' column.")
             series = values["count"]
         else:
             series = values
+        if min_periods is None:
+            min_periods = window_size
         return series.astype(float).rolling(
-            window=window_days,
-            min_periods=window_days,
+            window=window_size,
+            min_periods=min_periods,
         ).mean()
+
+    @classmethod
+    def add_moving_average_column(
+        cls,
+        frame: pd.DataFrame,
+        window_size: int,
+        output_column: str,
+    ) -> pd.DataFrame:
+        """Return a copy of ``frame`` annotated with a trailing moving average."""
+        if "count" not in frame.columns:
+            raise KeyError("Frequency table must contain a 'count' column.")
+        annotated = frame.copy()
+        annotated[output_column] = cls.compute_moving_average(
+            annotated["count"],
+            window_size=window_size,
+        )
+        return annotated
 
     @staticmethod
     def aggregate_daily_counts_by_week(frame: pd.DataFrame) -> pd.DataFrame:
-        """Aggregate a date-frequency table into one count per ISO week."""
+        """Aggregate a date-frequency table into one count per ISO week start date."""
+        if frame.empty:
+            return pd.DataFrame(
+                {
+                    "week": pd.Series(dtype="datetime64[ns]"),
+                    "count": pd.Series(dtype=int),
+                }
+            )
+
+        iso_calendar = frame.index.to_series().dt.isocalendar()
+        week_start = pd.to_datetime(
+            iso_calendar["year"].astype(str)
+            + "-W"
+            + iso_calendar["week"].astype(str).str.zfill(2)
+            + "-1",
+            format="%G-W%V-%u",
+        )
         weekly = (
             frame.reset_index(drop=False)
-            .assign(week=lambda df: df["date"].dt.isocalendar().week.astype(int))
+            .assign(week=week_start.to_numpy())
             .groupby("week", as_index=False)["count"]
             .sum()
             .sort_values("week")
             .reset_index(drop=True)
         )
+        weekly["week"] = pd.to_datetime(weekly["week"]).dt.normalize()
         weekly["count"] = weekly["count"].astype(int)
         return weekly
+
+    def _persist_daily_frequency_tables(
+        self,
+        freq_df: pd.DataFrame,
+        freq_dhf: pd.DataFrame,
+    ) -> None:
+        """Persist the daily DF and DHF frequency tables as CSV files."""
+        freq_df.reset_index().to_csv(
+            self.build_data_file_path("frequency_per_date_DF.csv"),
+            index=False,
+            date_format="%Y-%m-%d",
+        )
+        freq_dhf.reset_index().to_csv(
+            self.build_data_file_path("frequency_per_date_DHF.csv"),
+            index=False,
+            date_format="%Y-%m-%d",
+        )
+
+    def _persist_weekly_frequency_tables(
+        self,
+        freq_df: pd.DataFrame,
+        freq_dhf: pd.DataFrame,
+    ) -> None:
+        """Persist the weekly DF and DHF frequency tables as CSV files."""
+        freq_df.to_csv(
+            self.build_data_file_path("frequency_per_week_DF.csv"),
+            index=False,
+            date_format="%Y-%m-%d",
+        )
+        freq_dhf.to_csv(
+            self.build_data_file_path("frequency_per_week_DHF.csv"),
+            index=False,
+            date_format="%Y-%m-%d",
+        )
 
     def build_daily_frequency_tables(self, persist: bool = True):
         """Return DF and DHF daily frequency tables and optionally persist them as CSV."""
         df_df, df_dhf = self.load_incidence_dataframes()
-        freq_df = self.count_cases_by_date(df_df)
-        freq_dhf = self.count_cases_by_date(df_dhf)
+        freq_df = self.add_moving_average_column(
+            self.count_cases_by_date(df_df),
+            window_size=self.DAILY_MOVING_AVERAGE_WINDOW_DAYS,
+            output_column=self.DAILY_MOVING_AVERAGE_COLUMN,
+        )
+        freq_dhf = self.add_moving_average_column(
+            self.count_cases_by_date(df_dhf),
+            window_size=self.DAILY_MOVING_AVERAGE_WINDOW_DAYS,
+            output_column=self.DAILY_MOVING_AVERAGE_COLUMN,
+        )
         freq_df["count"] = freq_df["count"].astype(int)
         freq_dhf["count"] = freq_dhf["count"].astype(int)
         self.daily_df_frequency_table = freq_df
         self.daily_dhf_frequency_table = freq_dhf
 
         if persist:
-            freq_df.reset_index().to_csv(
-                self.build_data_file_path("frequency_per_date_DF.csv"),
-                index=False,
-                date_format="%Y-%m-%d",
-            )
-            freq_dhf.reset_index().to_csv(
-                self.build_data_file_path("frequency_per_date_DHF.csv"),
-                index=False,
-                date_format="%Y-%m-%d",
-            )
+            self._persist_daily_frequency_tables(freq_df, freq_dhf)
         return freq_df, freq_dhf
 
-    def build_weekly_frequency_tables(self):
-        """Return DF and DHF weekly frequency tables and persist them as CSV."""
-        freq_date_df, freq_date_dhf = self.build_daily_frequency_tables()
-        freq_df = self.aggregate_daily_counts_by_week(freq_date_df)
-        freq_dhf = self.aggregate_daily_counts_by_week(freq_date_dhf)
+    def build_weekly_frequency_tables(self, persist: bool = True):
+        """Return DF and DHF weekly frequency tables keyed by week start date."""
+        freq_date_df, freq_date_dhf = self.build_daily_frequency_tables(persist=persist)
+        freq_df = self.add_moving_average_column(
+            self.aggregate_daily_counts_by_week(freq_date_df),
+            window_size=self.WEEKLY_MOVING_AVERAGE_WINDOW_WEEKS,
+            output_column=self.WEEKLY_MOVING_AVERAGE_COLUMN,
+        )
+        freq_dhf = self.add_moving_average_column(
+            self.aggregate_daily_counts_by_week(freq_date_dhf),
+            window_size=self.WEEKLY_MOVING_AVERAGE_WINDOW_WEEKS,
+            output_column=self.WEEKLY_MOVING_AVERAGE_COLUMN,
+        )
 
         self.weekly_df_frequency_table = freq_df
         self.weekly_dhf_frequency_table = freq_dhf
-        weekly_df_array = freq_df[["week", "count"]].to_numpy(dtype=int)
-        weekly_dhf_array = freq_dhf[["week", "count"]].to_numpy(dtype=int)
+        weekly_df_array = freq_df[["week", "count"]].to_numpy(dtype=object)
+        weekly_dhf_array = freq_dhf[["week", "count"]].to_numpy(dtype=object)
         self.weekly_df_frequency_array = weekly_df_array
         self.weekly_dhf_frequency_array = weekly_dhf_array
 
-        freq_df.to_csv(self.build_data_file_path("frequency_per_week_DF.csv"), index=False)
-        freq_dhf.to_csv(self.build_data_file_path("frequency_per_week_DHF.csv"), index=False)
+        if persist:
+            self._persist_weekly_frequency_tables(freq_df, freq_dhf)
         return freq_df, freq_dhf
 
     def build_weekly_frequency_arrays(self):
         """Return weekly DF and DHF frequency tables as NumPy arrays."""
         freq_df, freq_dhf = self.build_weekly_frequency_tables()
         return (
-            freq_df[["week", "count"]].to_numpy(dtype=int),
-            freq_dhf[["week", "count"]].to_numpy(dtype=int),
+            freq_df[["week", "count"]].to_numpy(dtype=object),
+            freq_dhf[["week", "count"]].to_numpy(dtype=object),
         )
 
     def plot_weekly_frequency_data(self):

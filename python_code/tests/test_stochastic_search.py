@@ -4,6 +4,8 @@ except ImportError:
     from . import _bootstrap  # noqa: F401 - package-relative fallback
 
 import json
+import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,23 +14,82 @@ import pytest
 from StochasticSearchPy.stochastic_search import StochasticSearch
 
 
+def _load_default_parameter_map():
+    parameter_path = Path(__file__).resolve().parents[1] / StochasticSearch.DEFAULT_MODEL_PARAMETER_FILE
+    with parameter_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    params = StochasticSearch._flatten_parameter_payload(payload)
+    params.setdefault("N_H", params.get("N_S"))
+    params.setdefault("N_sm1", params.get("N_S_m1"))
+    return params
+
+
 def test_sample_model_parameters_returns_single_row_dataframe(tmp_path, sample_data_dir):
     sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    expected_parameters = _load_default_parameter_map()
 
     parameter_frame = sim.sample_model_parameters(flag_deterministic=True)
 
     assert isinstance(parameter_frame, pd.DataFrame)
     assert list(parameter_frame.columns) == list(sim.SAMPLED_PARAMETER_COLUMNS)
     assert len(parameter_frame.index) == 1
+    assert sim.beta_H == pytest.approx(expected_parameters["beta_H"])
+    assert sim.beta_M == pytest.approx(expected_parameters["beta_M"])
+    assert sim.mu_H == pytest.approx(expected_parameters["mu_H"])
 
     row = parameter_frame.iloc[0]
     for column in sim.SAMPLED_PARAMETER_COLUMNS:
         assert row[column] == pytest.approx(getattr(sim, column))
 
 
+def test_init_loads_default_model_parameters_from_json(tmp_path, sample_data_dir):
+    expected_parameters = _load_default_parameter_map()
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+
+    for key in (
+        "Lambda_M",
+        "Lambda_S",
+        "Lambda_S_m1",
+        "beta_M",
+        "beta_H",
+        "mu_M",
+        "mu_H",
+        "alpha_c",
+        "alpha_h",
+        "sigma",
+        "p",
+        "theta",
+        "S_0",
+        "I_10",
+        "I_20",
+        "M_s0",
+        "M_10",
+        "M_20",
+        "S_m1_0",
+        "Y_m1_c0",
+        "Y_m1_h0",
+        "R_s0",
+        "R_s_m1_0",
+        "Rec_0",
+        "z0",
+        "N_H",
+        "N_sm1",
+        "t0",
+        "T",
+        "h",
+        "r_01",
+        "r_02",
+        "r_zero",
+        "peak_df_cases",
+    ):
+        assert getattr(sim, key) == pytest.approx(expected_parameters[key])
+    assert sim.grid_size == int(expected_parameters["grid_size"])
+
+
 def test_sample_model_parameters_stochastic_path_updates_instance_state(tmp_path, sample_data_dir):
     sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
     np.random.seed(0)
+    expected_parameters = _load_default_parameter_map()
 
     parameter_frame = sim.sample_model_parameters(flag_deterministic=False)
 
@@ -36,17 +97,51 @@ def test_sample_model_parameters_stochastic_path_updates_instance_state(tmp_path
     assert parameter_frame.loc[0, "R_s0"] == pytest.approx(0.0)
     assert parameter_frame.loc[0, "R_s_m1_0"] == pytest.approx(0.0)
     assert sim.Rec_0 == pytest.approx(0.0)
-    assert sim.mu_H == pytest.approx(0.000039 * 7.0)
+    assert sim.mu_H == pytest.approx(expected_parameters["mu_H"])
+    assert sim.N_S == pytest.approx(sim.S_0 + sim.I_10 + sim.I_20 + sim.R_s0)
+    assert sim.N_S_m1 == pytest.approx(sim.S_m1_0 + sim.Y_m1_c0 + sim.Y_m1_h0 + sim.R_s_m1_0)
+    assert sim.Lambda_S == pytest.approx(sim.mu_H * sim.N_S)
+    assert sim.Lambda_S_m1 == pytest.approx(sim.mu_H * sim.N_S_m1)
+    assert sim.Lambda_M == pytest.approx(sim.mu_M * (sim.M_s0 + sim.M_10 + sim.M_20))
+    assert sim.z0 == pytest.approx(sim.p * (sim.I_10 + sim.I_20 + sim.Y_m1_c0))
+    assert 10.36 <= sim.b <= 33.39
+    assert 0.252 <= sim.mu_M <= 0.763
+    assert 0.0 < sim.beta_H <= 0.05
+    assert 0.0 < sim.beta_M <= 0.05
+    assert 0.581 <= sim.alpha_c <= 1.75
+    assert 0.581 <= sim.alpha_h <= 1.75
+    assert 0.0 < sim.sigma <= 5.0
+    assert 1.0 / 60.0 <= sim.p <= 1.0 / 30.0
 
 
 def test_compute_basic_reproduction_numbers_matches_baseline_parameters(tmp_path, sample_data_dir):
     sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    expected_parameters = _load_default_parameter_map()
 
     r01_per_week, r02_per_week, r0_per_week = sim.compute_basic_reproduction_numbers()
+    pi_r = (
+        expected_parameters["beta_H"]
+        * expected_parameters["beta_M"]
+        * expected_parameters["b"] ** 2
+        * expected_parameters["Lambda_M"]
+    ) / (
+        expected_parameters["N_H"] ** 2
+        * expected_parameters["mu_M"] ** 2
+    )
+    expected_r01_square = pi_r * (
+        (expected_parameters["N_H"] - expected_parameters["N_sm1"])
+        + expected_parameters["sigma"] * (1.0 - expected_parameters["theta"]) * expected_parameters["N_sm1"]
+    ) / (expected_parameters["alpha_c"] + expected_parameters["mu_H"])
+    expected_r02_square = pi_r * expected_parameters["sigma"] * expected_parameters["theta"] * expected_parameters["N_sm1"] / (
+        expected_parameters["alpha_c"] + expected_parameters["alpha_h"]
+    )
+    expected_r01 = np.sqrt(expected_r01_square)
+    expected_r02 = np.sqrt(expected_r02_square)
+    expected_r0 = np.sqrt(expected_r01_square + expected_r02_square)
 
-    assert r01_per_week == pytest.approx(1.9033635638379547)
-    assert r02_per_week == pytest.approx(0.17132774893607353)
-    assert r0_per_week == pytest.approx(1.9110588828451682)
+    assert r01_per_week == pytest.approx(expected_r01)
+    assert r02_per_week == pytest.approx(expected_r02)
+    assert r0_per_week == pytest.approx(expected_r0)
 
 
 def test_create_fitting_plot(tmp_path, sample_data_dir):
@@ -73,7 +168,7 @@ def test_create_fitting_plot(tmp_path, sample_data_dir):
     # Validate that the returned object is a matplotlib figure
     assert figure is not None
     assert figure.get_axes()  # Ensure there are axes present
-    assert len(figure.axes) == 4  # Ensure the expected four subplots exist
+    assert len(figure.axes) == 6  # Ensure the expected six subplots exist
 
 
 def test_create_fitting_plot_uses_moving_average_fitting_window(tmp_path, sample_data_dir):
@@ -89,13 +184,43 @@ def test_create_fitting_plot_uses_moving_average_fitting_window(tmp_path, sample
     sim.compute_fitting_errors()
 
     figure = sim.create_fitting_plot()
-    df_fitting_axis = figure.axes[1]
-    dhf_fitting_axis = figure.axes[3]
+    df_daily_axis = figure.axes[1]
+    df_weekly_axis = figure.axes[2]
+    dhf_daily_axis = figure.axes[4]
+    dhf_weekly_axis = figure.axes[5]
+    expected_plot_weeks = int(min(sim.T, sim.PLOT_END_WEEK) - sim.t0)
+    expected_plot_days = expected_plot_weeks * sim.DAYS_PER_WEEK
 
-    assert "7-day average" in df_fitting_axis.get_title()
-    assert "7-day average" in dhf_fitting_axis.get_title()
-    assert len(df_fitting_axis.lines[0].get_xdata()) == sim.FITTING_WINDOW_WEEKS * sim.DAYS_PER_WEEK
-    assert len(dhf_fitting_axis.lines[0].get_xdata()) == sim.FITTING_WINDOW_WEEKS * sim.DAYS_PER_WEEK
+    assert "7-day Average" in df_daily_axis.get_title()
+    assert "3-week Average" in df_weekly_axis.get_title()
+    assert "7-day Average" in dhf_daily_axis.get_title()
+    assert "3-week Average" in dhf_weekly_axis.get_title()
+    assert len(df_daily_axis.lines[0].get_xdata()) == expected_plot_days
+    assert len(dhf_daily_axis.lines[0].get_xdata()) == expected_plot_days
+    assert len(df_weekly_axis.lines[0].get_xdata()) == expected_plot_weeks
+    assert len(dhf_weekly_axis.lines[0].get_xdata()) == expected_plot_weeks
+    assert df_daily_axis.get_xlim()[1] == pytest.approx(sim.PLOT_END_WEEK)
+    assert dhf_daily_axis.get_xlim()[1] == pytest.approx(sim.PLOT_END_WEEK)
+    assert any(text.get_text().startswith("err=") for text in df_weekly_axis.texts)
+    assert any(text.get_text().startswith("err=") for text in dhf_weekly_axis.texts)
+
+
+def test_create_fitting_plot_includes_sampled_simulated_scatter_on_daily_and_weekly_panels(
+    tmp_path,
+    sample_data_dir,
+):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    grid_size = int(sim.T - sim.t0) * 10000
+    sim.t = np.linspace(sim.t0, sim.T, grid_size)
+    sim.solution = sim._build_solution_frame(
+        sim.t,
+        np.ones((grid_size, len(sim.ODE_STATE_COLUMNS))),
+    )
+
+    figure = sim.create_fitting_plot()
+
+    for axis in (figure.axes[1], figure.axes[2], figure.axes[4], figure.axes[5]):
+        assert len(axis.collections) >= 1
 
 
 def test_create_fitting_plot_uses_observation_scale_on_fitting_panels_only(tmp_path, sample_data_dir):
@@ -113,14 +238,100 @@ def test_create_fitting_plot_uses_observation_scale_on_fitting_panels_only(tmp_p
 
     figure = sim.create_fitting_plot()
     df_qualitative_ymax = figure.axes[0].get_ylim()[1]
-    df_fitting_ymax = figure.axes[1].get_ylim()[1]
-    dhf_qualitative_ymax = figure.axes[2].get_ylim()[1]
-    dhf_fitting_ymax = figure.axes[3].get_ylim()[1]
+    df_daily_ymax = figure.axes[1].get_ylim()[1]
+    df_weekly_ymax = figure.axes[2].get_ylim()[1]
+    dhf_qualitative_ymax = figure.axes[3].get_ylim()[1]
+    dhf_daily_ymax = figure.axes[4].get_ylim()[1]
+    dhf_weekly_ymax = figure.axes[5].get_ylim()[1]
 
     assert df_qualitative_ymax >= 750.0
     assert dhf_qualitative_ymax >= 125.0
-    assert df_fitting_ymax < 25.0
-    assert dhf_fitting_ymax < 15.0
+    assert df_daily_ymax < df_qualitative_ymax / 10.0
+    assert df_weekly_ymax < df_qualitative_ymax / 5.0
+    assert dhf_daily_ymax < dhf_qualitative_ymax / 4.0
+    assert dhf_weekly_ymax < dhf_qualitative_ymax / 2.0
+
+
+def test_compute_fitting_errors_populates_weekly_error_metrics(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    grid_size = int(sim.T - sim.t0) * 10000
+    sim.t = np.linspace(sim.t0, sim.T, grid_size)
+    sim.solution = sim._build_solution_frame(
+        sim.t,
+        np.ones((grid_size, len(sim.ODE_STATE_COLUMNS))),
+    )
+
+    sim.compute_fitting_errors()
+
+    assert isinstance(sim.df_weekly_fit_error, float)
+    assert isinstance(sim.dhf_weekly_fit_error, float)
+    assert np.isfinite(sim.df_weekly_fit_error)
+    assert np.isfinite(sim.dhf_weekly_fit_error)
+
+
+def test_create_reference_parameter_fitting_plot_uses_deterministic_reference_flow(
+    tmp_path,
+    sample_data_dir,
+    monkeypatch,
+):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    call_trace = []
+    sentinel_figure = object()
+
+    def fake_sample_model_parameters(flag_deterministic=False):
+        call_trace.append(("sample_model_parameters", bool(flag_deterministic)))
+        return sim._build_sample_parameter_frame()
+
+    def fake_solve_ode_system():
+        call_trace.append(("solve_ode_system", None))
+        return sim.solution
+
+    def fake_compute_fitting_errors():
+        call_trace.append(("compute_fitting_errors", None))
+        return None
+
+    def fake_create_fitting_plot(figure=None):
+        call_trace.append(("create_fitting_plot", figure))
+        return sentinel_figure
+
+    monkeypatch.setattr(sim, "sample_model_parameters", fake_sample_model_parameters)
+    monkeypatch.setattr(sim, "solve_ode_system", fake_solve_ode_system)
+    monkeypatch.setattr(sim, "compute_fitting_errors", fake_compute_fitting_errors)
+    monkeypatch.setattr(sim, "create_fitting_plot", fake_create_fitting_plot)
+
+    figure_hint = object()
+    returned_figure = sim.create_reference_parameter_fitting_plot(figure=figure_hint)
+
+    assert returned_figure is sentinel_figure
+    assert call_trace == [
+        ("sample_model_parameters", True),
+        ("solve_ode_system", None),
+        ("compute_fitting_errors", None),
+        ("create_fitting_plot", figure_hint),
+    ]
+
+
+def test_comparison_frames_split_plot_and_error_intervals(tmp_path, sample_data_dir):
+    sim = StochasticSearch(data_dir=sample_data_dir, runtime_dir=tmp_path / "runtime")
+    time_weeks = np.array([25.0, 39.0, 53.0], dtype=np.float64)
+    solution_values = np.ones((len(time_weeks), len(sim.ODE_STATE_COLUMNS)), dtype=np.float64)
+    sim.solution = sim._build_solution_frame(time_weeks, solution_values)
+
+    df_error_frame, dhf_error_frame = sim._build_fitting_comparison_frames()
+    df_plot_frame, dhf_plot_frame = sim._build_plot_comparison_frames()
+
+    expected_plot_start_date = pd.Timestamp(datetime.date.fromisocalendar(2010, 25, 1))
+    expected_error_start_date = pd.Timestamp(datetime.date.fromisocalendar(2010, 27, 1))
+    assert df_plot_frame["time_week"].iloc[0] == pytest.approx(time_weeks[0])
+    assert dhf_plot_frame["time_week"].iloc[0] == pytest.approx(time_weeks[0])
+    assert df_plot_frame.index[0] == expected_plot_start_date
+    assert dhf_plot_frame.index[0] == expected_plot_start_date
+    assert df_error_frame["time_week"].iloc[0] == pytest.approx(sim.FITTING_ERROR_START_WEEK)
+    assert dhf_error_frame["time_week"].iloc[0] == pytest.approx(sim.FITTING_ERROR_START_WEEK)
+    assert df_error_frame.index[0] == expected_error_start_date
+    assert dhf_error_frame.index[0] == expected_error_start_date
+    assert len(df_error_frame.index) == sim.FITTING_WINDOW_WEEKS * sim.DAYS_PER_WEEK
+    assert len(dhf_error_frame.index) == sim.FITTING_WINDOW_WEEKS * sim.DAYS_PER_WEEK
 
 
 def test_solve_ode_system_replaces_zero_placeholder_solution(tmp_path, sample_data_dir):
@@ -199,10 +410,14 @@ def test_save_acceptance_snapshot_writes_reproducible_artifacts(tmp_path, sample
     reloaded.load_parameters_from_json(parameter_path)
     reloaded.load_solution_snapshot(solution_path)
     reloaded.compute_fitting_errors()
+    reloaded.df_error_threshold = snapshot["acceptance_thresholds"]["df_fit_error_max"]
+    reloaded.dhf_error_threshold = snapshot["acceptance_thresholds"]["dhf_fit_error_max"]
     r01_per_week, r02_per_week, r0_per_week = reloaded.compute_basic_reproduction_numbers()
 
     assert reloaded.df_fit_error == pytest.approx(snapshot["acceptance_metrics"]["df_fit_error"])
     assert reloaded.dhf_fit_error == pytest.approx(snapshot["acceptance_metrics"]["dhf_fit_error"])
+    assert reloaded.df_weekly_fit_error == pytest.approx(snapshot["acceptance_metrics"]["df_weekly_fit_error"])
+    assert reloaded.dhf_weekly_fit_error == pytest.approx(snapshot["acceptance_metrics"]["dhf_weekly_fit_error"])
     assert r01_per_week == pytest.approx(snapshot["acceptance_metrics"]["r01_per_week"])
     assert r02_per_week == pytest.approx(snapshot["acceptance_metrics"]["r02_per_week"])
     assert r0_per_week == pytest.approx(snapshot["acceptance_metrics"]["r0_per_week"])

@@ -1,0 +1,57 @@
+{
+    "recruitment_parameters": {
+        "Lambda_M": 58981.69688743474,
+        "Lambda_S": 9.223162376179753,
+        "Lambda_S_m1": 1.0247958195755271
+    },
+    "transmission_parameters": {
+        "beta_H": 0.02836240177975806,
+        "beta_M": 0.04332326714004707,
+        "b": 14.132572280614172
+    },
+    "vital_dynamics_parameters": {
+        "mu_H": 0.000273,
+        "mu_M": 0.4281264876854035
+    },
+    "clinical_progression_parameters": {
+        "alpha_c": 0.6720415676216016,
+        "alpha_h": 1.5954921479489834
+    },
+    "risk_and_reporting_parameters": {
+        "sigma": 3.1473615629360534,
+        "theta": 0.14199295239250997,
+        "p": 0.10688330161750113
+    },
+    "initial_conditions": {
+        "S_0": 35598.0,
+        "I_10": 1.0,
+        "I_20": 1.0,
+        "M_s0": 120000.0,
+        "M_10": 10.0,
+        "M_20": 10.0,
+        "S_m1_0": 3753.8308409359997,
+        "Y_m1_c0": 0.0,
+        "Y_m1_h0": 0.0,
+        "R_s0": 0.0,
+        "R_s_m1_0": 0.0,
+        "z0": 0.21376660323500227,
+        "Rec_0": 0.0
+    },
+    "derived_population_parameters": {
+        "N_S": 33668.91794894356,
+        "N_S_m1": 3740.990883215948,
+        "N_M": 137766.98845780303
+    },
+    "integration_parameters": {
+        "t0": 27.0,
+        "T": 53.0,
+        "grid_size": 280000,
+        "h": 0.00018928571428571428
+    },
+    "state_tracking_parameters": {
+        "peak_df_cases": 1000.0,
+        "r_01": 0.0,
+        "r_02": 0.0,
+        "r_zero": 0.0
+    }
+}

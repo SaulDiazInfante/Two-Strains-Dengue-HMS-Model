@@ -1,0 +1,54 @@
+Continue work on the repository at:
+
+  /home/saul/second_nvme_drive/Two-Strains-Dengue-HMS-Model/python_code
+
+  This session already made several changes. Do not restart from scratch. First inspect the current code and git
+  diff, then continue from the current state.
+
+  Important context:
+
+  1. `compute_fitting_errors()` in `src/StochasticSearchPy/stochastic_search.py` was refactored to use a 7-day
+  moving average on daily data, not the old weekly sampled-point comparison.
+  2. Daily case counting in `src/StochasticSearchPy/data_processing.py` was refactored so missing calendar days are
+  zero-filled. Daily CSV persistence was also fixed to write explicit `date,count` columns.
+  3. The fitting plot in `src/StochasticSearchPy/stochastic_search.py` was updated to show the 7-day moving-average
+  fitting window.
+  4. The stochastic search CLI in `src/StochasticSearchPy/cli.py` was refactored so it stops on first acceptance
+  and writes a reproducibility bundle:
+     - parameter snapshot JSON
+     - raw solution snapshot CSV
+     - acceptance snapshot JSON
+     - fitting window data
+     - plot artifact references
+  5. Acceptance snapshot support was added in `src/StochasticSearchPy/stochastic_search.py`, including:
+     - `save_parameter_snapshot(...)`
+     - `save_solution_snapshot(...)`
+     - `load_solution_snapshot(...)`
+     - `save_acceptance_snapshot(...)`
+  6. Fitting start indices were adjusted to use a common start date of `2010-09-13`:
+     - `DF_FITTING_START_INDEX = 10`
+     - `DHF_FITTING_START_INDEX = 6`
+     This was chosen because, within the 10-week fitting window, both raw daily series have at most 3 consecutive
+  zero-case days; for the chosen window DF has max gap 0 and DHF max gap 1.
+  7. A new method was added to manage the solution as a time series sampled in days:
+     - `build_sampled_solution_time_series(sample_interval_days=1)`
+     - `save_sampled_solution_time_series(...)`
+     This writes a CSV with `time_day`, `time_grid`, and all ODE state columns.
+  8. `save_acceptance_snapshot()` was updated so accepted runs also save `solution_time_series_<timestamp>.csv`.
+
+  Tests already updated:
+  - `tests/test_stochastic_search.py`
+  - `tests/test_cli.py`
+  - `tests/test_data_processing.py`
+
+  Latest verification status:
+  - `python -m pytest` passed with `31 passed`
+
+  Notes:
+  - There are existing modified data files under `data/reference/raw_data/`; do not revert them unless explicitly
+  asked.
+  - Please preserve the current direction and avoid undoing these refactors.
+
+  Start by reading the current implementation and summarizing the exact current state before making further
+  changes.
+

@@ -54,16 +54,23 @@ def _build_expected_daily_counts(data_dir, fever):
 
 def _build_expected_weekly_counts(data_dir, fever):
     daily_counts = _build_expected_daily_counts(data_dir, fever)
+    iso_calendar = daily_counts.index.to_series().dt.isocalendar()
+    week_start = pd.to_datetime(
+        iso_calendar["year"].astype(str)
+        + "-W"
+        + iso_calendar["week"].astype(str).str.zfill(2)
+        + "-1",
+        format="%G-W%V-%u",
+    )
     expected = (
-        daily_counts.assign(
-            week=daily_counts.index.to_series().dt.isocalendar().week.astype(int)
-        )
+        daily_counts.assign(week=week_start.to_numpy())
         .groupby("week", as_index=False)["count"]
         .sum()
         .sort_values("week")
         .reset_index(drop=True)
-        .astype({"week": int, "count": int})
     )
+    expected["week"] = pd.to_datetime(expected["week"]).dt.normalize()
+    expected["count"] = expected["count"].astype(int)
     return expected
 
 
@@ -85,8 +92,10 @@ def test_build_weekly_frequency_tables_use_real_sqlite(real_data):
 
     expected_df = _build_expected_weekly_counts(real_data, "FD")
     expected_dhf = _build_expected_weekly_counts(real_data, "FHD")
-    assert_frame_equal(freq_df.astype({"week": int, "count": int}), expected_df)
-    assert_frame_equal(freq_dhf.astype({"week": int, "count": int}), expected_dhf)
+    assert_frame_equal(freq_df, expected_df)
+    assert_frame_equal(freq_dhf, expected_dhf)
+    assert pd.api.types.is_datetime64_any_dtype(freq_df["week"])
+    assert pd.api.types.is_datetime64_any_dtype(freq_dhf["week"])
     assert Path(real_data / "frequency_per_week_DF.csv").exists()
     assert Path(real_data / "frequency_per_week_DHF.csv").exists()
 
@@ -96,8 +105,8 @@ def test_build_weekly_frequency_arrays_match_weekly_frequency_tables(real_data):
         weekly_df, weekly_dhf = processor.build_weekly_frequency_tables()
         weekly_df_array, weekly_dhf_array = processor.build_weekly_frequency_arrays()
 
-    assert weekly_df_array.tolist() == weekly_df[["week", "count"]].to_numpy(dtype=int).tolist()
-    assert weekly_dhf_array.tolist() == weekly_dhf[["week", "count"]].to_numpy(dtype=int).tolist()
+    assert weekly_df_array.tolist() == weekly_df[["week", "count"]].to_numpy(dtype=object).tolist()
+    assert weekly_dhf_array.tolist() == weekly_dhf[["week", "count"]].to_numpy(dtype=object).tolist()
 
 
 def test_excel_date_conversion_returns_datetime():
